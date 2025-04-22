@@ -1,0 +1,4 @@
+aiogram
+openpyxl
+pandas
+pytz
