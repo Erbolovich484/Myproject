@@ -17,8 +17,9 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import FSInputFile
+from aiogram.types import FSInputFile, Update
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.default import DefaultBotProperties
 
 from aiohttp import web
 
@@ -29,7 +30,7 @@ CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # e.g. https://your-app.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
 
 # === FSM СТЕЙТЫ ===
@@ -38,7 +39,7 @@ class Form(StatesGroup):
     pharmacy = State()
     rating   = State()
 
-# === ЧТЕНИЕ КРИТЕРИЕВ ===
+# === ЗАГРУЗКА КРИТЕРИЕВ ===
 criteria_df = pd.read_excel(CHECKLIST_PATH, sheet_name='Чек лист', header=None)
 start_i = criteria_df[criteria_df.iloc[:,0]=="Блок"].index[0] + 1
 criteria_df = criteria_df.iloc[start_i:,:8].reset_index(drop=True)
@@ -71,9 +72,13 @@ def log_submission(pharmacy, name, ts, score, max_score):
             w.writerow(["Дата","Аптека","ФИО","Баллы","Макс"])
         w.writerow([ts, pharmacy, name, score, max_score])
 
-# === ИнициалИЗАЦИЯ ===
+# === ИНИЦИАЛИЗАЦИЯ БОТА ===
 session = AiohttpSession()
-bot = Bot(token=API_TOKEN, session=session, default=types.DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=API_TOKEN,
+    session=session,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
@@ -81,7 +86,7 @@ dp = Dispatcher(storage=storage)
 @dp.message(F.text == "/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("📋 <b>Чек-лист посещения аптек</b>\nВведите ФИО:", parse_mode=ParseMode.HTML)
+    await msg.answer("📋 <b>Чек-лист посещения аптек</b>\nВведите ваше ФИО:", parse_mode=ParseMode.HTML)
     await state.set_state(Form.name)
 
 @dp.message(Form.name)
@@ -103,14 +108,12 @@ async def score_handler(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
 
-    # «Назад»
     if cb.data == "prev" and step > 0:
         data["step"] -= 1
         data["data"].pop()
         await state.set_data(data)
         return await send_criterion(cb.from_user.id, state)
 
-    # Сохраняем и показываем
     score = int(cb.data.split("_")[1])
     if step < len(criteria_list):
         data.setdefault("data", []).append({"crit": criteria_list[step], "score": score})
@@ -118,9 +121,9 @@ async def score_handler(cb: types.CallbackQuery, state: FSMContext):
         await state.set_data(data)
 
     await bot.edit_message_text(
-        cb.message.chat.id,
-        cb.message.message_id,
-        f"✅ Оценка: {score} {'⭐'*score}"
+        chat_id=cb.message.chat.id,
+        message_id=cb.message.message_id,
+        text=f"✅ Оценка: {score} {'⭐'*score}"
     )
     await send_criterion(cb.from_user.id, state)
 
@@ -144,7 +147,7 @@ async def send_criterion(chat_id: int, state: FSMContext):
 
     kb = InlineKeyboardBuilder()
     start = 0 if c["max"] == 1 else 1
-    for i in range(start, c["max"]+1):
+    for i in range(start, c["max"] + 1):
         kb.button(text=str(i), callback_data=f"score_{i}")
     if step > 0:
         kb.button(text="◀️ Назад", callback_data="prev")
@@ -153,14 +156,13 @@ async def send_criterion(chat_id: int, state: FSMContext):
     await bot.send_message(chat_id, text, reply_markup=kb.as_markup(), parse_mode=ParseMode.HTML)
 
 async def generate_and_send(chat_id: int, session_data):
-    name   = session_data["name"]
-    ts     = session_data["start"]
-    pharm  = session_data.get("pharmacy", "Без названия")
+    name  = session_data["name"]
+    ts    = session_data["start"]
+    pharm = session_data.get("pharmacy", "Без названия")
 
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    # Заголовок
     title = (
         f"Отчёт по проверке аптеки\nИсполнитель: {name}\n"
         f"Дата: {datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
@@ -170,27 +172,31 @@ async def generate_and_send(chat_id: int, session_data):
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharm
 
-    # Шапка
     headers = ["Блок","Критерий","Требование","Баллы","Макс","Примечание","Дата"]
-    for i,h in enumerate(headers, start=1):
-        cell = ws.cell(row=5, column=i, value=h)
+    for idx, h in enumerate(headers, start=1):
+        cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
 
-    # Данные
-    row = 6; total=0; total_max=0
+    row = 6
+    total = 0
+    total_max = 0
     for item in session_data["data"]:
-        c = item["crit"]; sc = item["score"]
+        c = item["crit"]
+        sc = item["score"]
         ws.cell(row,1,c["block"])
         ws.cell(row,2,c["criterion"])
         ws.cell(row,3,c["requirement"])
         ws.cell(row,4,sc)
         ws.cell(row,5,c["max"])
         ws.cell(row,7,ts)
-        total += sc; total_max += c["max"]
+        total += sc
+        total_max += c["max"]
         row += 1
 
-    ws.cell(row+1,3,"ИТОГО:");   ws.cell(row+1,4,total)
-    ws.cell(row+2,3,"Максимум:"); ws.cell(row+2,4,total_max)
+    ws.cell(row+1,3,"ИТОГО:")
+    ws.cell(row+1,4,total)
+    ws.cell(row+2,3,"Максимум:")
+    ws.cell(row+2,4,total_max)
 
     filename = f"{pharm}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ","_")
     wb.save(filename)
@@ -200,14 +206,14 @@ async def generate_and_send(chat_id: int, session_data):
     log_submission(pharm, name, ts, total, total_max)
     await bot.send_message(chat_id, "Готово! /start — чтобы заново.")
 
-# === Обработчик Webhook-POST от Telegram ===
+# === Webhook handler ===
 async def handle_webhook(request: web.Request):
     data = await request.json()
-    update = types.Update(**data)
+    update = Update(**data)
     await dp.feed_update(update)
     return web.Response(text="OK")
 
-# === Запуск AioHTTP-сервера и регистрация Webhook ===
+# === Запуск AioHTTP-сервера и Webhook ===
 async def on_startup(app: web.Application):
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
 
