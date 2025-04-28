@@ -24,14 +24,14 @@ from aiohttp import web
 # === Загрузка конфигурации ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
-CHAT_ID        = int(os.getenv("CHAT_ID", "0"))  # QA-чат
+CHAT_ID        = int(os.getenv("CHAT_ID", "0"))       # ваш QA-чат
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")        # https://<app>.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")             # https://<app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
 
-# === Разрешённые пользователи ===
+# === Список разрешённых ФИО ===
 ALLOWED_USERS = [
     "Николай Крылов",
     "Таждин Усейн",
@@ -41,13 +41,13 @@ ALLOWED_USERS = [
     "*"
 ]
 
-# === FSM-состояния ===
+# === Состояния FSM ===
 class Form(StatesGroup):
     name     = State()
     pharmacy = State()
     rating   = State()
 
-# === Чтение исходного чек-листа ===
+# === Чтение критериев из Excel ===
 df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
 start_i = df[df.iloc[:,0] == "Блок"].index[0] + 1
 df = df.iloc[start_i:,:8].reset_index(drop=True)
@@ -55,33 +55,32 @@ df.columns = [
     "Блок", "Критерий", "Требование", "Оценка",
     "Макс. значение", "Примечание", "Дата проверки", "Дата исправления"
 ]
-df = df.dropna(subset=["Критерий","Требование"])
+df = df.dropna(subset=["Критерий", "Требование"])
 
 criteria = []
 last_block = None
 for _, r in df.iterrows():
-    blk = r["Блок"] if pd.notna(r["Блок"]) else last_block
-    last_block = blk
+    block = r["Блок"] if pd.notna(r["Блок"]) else last_block
+    last_block = block
     maxv = int(r["Макс. значение"]) if pd.notna(r["Макс. значение"]) and str(r["Макс. значение"]).isdigit() else 10
     criteria.append({
-        "block": blk,
+        "block": block,
         "criterion": r["Критерий"],
         "requirement": r["Требование"],
         "max": maxv
     })
 
 # === Утилиты ===
-def get_time():
-    tz = pytz.timezone("Asia/Almaty")
-    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+def get_astana_time():
+    return datetime.now(pytz.timezone("Asia/Almaty")).strftime("%Y-%m-%d %H:%M:%S")
 
-def log_csv(pharmacy, name, ts, score, max_score):
+def log_submission(pharmacy, name, ts, score, max_score):
     exists = os.path.exists(LOG_PATH)
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
+        writer = csv.writer(f)
         if not exists:
-            w.writerow(["Дата","Аптека","ФИО проверяющего","Баллы","Макс"])
-        w.writerow([ts, pharmacy, name, score, max_score])
+            writer.writerow(["Дата", "Аптека", "ФИО проверяющего", "Баллы", "Макс"])
+        writer.writerow([ts, pharmacy, name, score, max_score])
 
 # === Инициализация бота и диспетчера ===
 session = AiohttpSession()
@@ -94,16 +93,18 @@ storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
 # === Хэндлеры команд ===
+
 @dp.message(F.text == "/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer(
+    info = (
         "📋 <b>Чек-лист посещения аптек</b>\n\n"
-        "Заполняйте внимательно — отчёт придёт автоматически.\n\n"
-        "✅ По завершении — отчёт в Excel.\n\n"
-        "🏁 Введите ваше ФИО для авторизации:",
-        parse_mode=ParseMode.HTML
+        "Этот инструмент предназначен для оценки соответствия аптек стандартам работы ГК «Садыхан».\n"
+        "🧠 Заполняйте чек-лист вдумчиво и внимательно.\n\n"
+        "✅ По завершению будет сформирован автоматический отчёт в Excel и отправлен в чат @SadykhanQA.\n\n"
+        "🏁 Чтобы начать, введите ваше ФИО:"
     )
+    await msg.answer(info)
     await state.set_state(Form.name)
 
 @dp.message(F.text == "/id")
@@ -120,18 +121,19 @@ async def cmd_log(msg: types.Message):
 @dp.message(F.text == "/сброс")
 async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("Состояние сброшено. /start — чтобы начать заново.")
+    await msg.answer("Состояние сброшено. Чтобы начать заново — /start")
 
 # === Авторизация и начало чек-листа ===
+
 @dp.message(Form.name)
-async def proc_name(msg: types.Message, state: FSMContext):
-    user = msg.text.strip()
-    if user in ALLOWED_USERS or "*" in ALLOWED_USERS:
+async def process_name(msg: types.Message, state: FSMContext):
+    user_name = msg.text.strip()
+    if user_name in ALLOWED_USERS or "*" in ALLOWED_USERS:
         await state.update_data(
-            name=user,
+            name=user_name,
             step=0,
             data=[],
-            start=get_time()
+            start=get_astana_time()
         )
         await msg.answer("Введите название аптеки:")
         await state.set_state(Form.pharmacy)
@@ -139,15 +141,17 @@ async def proc_name(msg: types.Message, state: FSMContext):
         await msg.answer("ФИО не распознано. Обратитесь в ИТ-отдел.")
 
 @dp.message(Form.pharmacy)
-async def proc_pharmacy(msg: types.Message, state: FSMContext):
+async def process_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
-    await msg.answer("Начинаем проверку…")
+    await msg.answer("Спасибо! Начинаем проверку…")
     await state.set_state(Form.rating)
-    await send_quest(msg.chat.id, state)
+    await send_criterion(msg.chat.id, state)
 
 # === Обработка нажатий кнопок ===
+
 @dp.callback_query(F.data.startswith("score_") | F.data == "prev")
-async def cb_all(cb: types.CallbackQuery, state: FSMContext):
+async def callback_handler(cb: types.CallbackQuery, state: FSMContext):
+    # сразу отвечаем, чтобы не было таймаута
     try:
         await cb.answer()
     except:
@@ -161,9 +165,9 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["step"] -= 1
         data["data"].pop()
         await state.set_data(data)
-        return await send_quest(cb.from_user.id, state)
+        return await send_criterion(cb.from_user.id, state)
 
-    # Оценка
+    # Считаем оценку
     score = int(cb.data.split("_")[1])
     if step < len(criteria):
         data.setdefault("data", []).append({
@@ -173,31 +177,35 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["step"] += 1
         await state.set_data(data)
 
+    # Редактируем сообщение
     await bot.edit_message_text(
         chat_id=cb.message.chat.id,
         message_id=cb.message.message_id,
         text=f"✅ Оценка: {score} {'⭐'*score}"
     )
-    return await send_quest(cb.from_user.id, state)
 
-# === Отправка следующего вопроса ===
-async def send_quest(chat_id: int, state: FSMContext):
+    return await send_criterion(cb.from_user.id, state)
+
+# === Отправка следующего критерия ===
+
+async def send_criterion(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
     total = len(criteria)
 
     if step >= total:
         await bot.send_message(chat_id, "Проверка завершена. Формируем отчёт…")
-        return await make_report(chat_id, data)
+        return await generate_and_send(chat_id, data)
 
     c = criteria[step]
     text = (
         f"<b>Вопрос {step+1} из {total}</b>\n\n"
-        f"<b>Блок:</b> {c['block']}\n"
+        f"<b>{c['block']}</b>\n\n"
         f"<b>Критерий:</b> {c['criterion']}\n"
         f"<b>Требование:</b> {c['requirement']}\n"
-        f"<b>Макс. балл:</b> {c['max']}"
+        f"Макс. балл: {c['max']}"
     )
+
     kb = InlineKeyboardBuilder()
     start = 0 if c["max"] == 1 else 1
     for i in range(start, c["max"] + 1):
@@ -206,15 +214,11 @@ async def send_quest(chat_id: int, state: FSMContext):
         kb.button(text="◀️ Назад", callback_data="prev")
     kb.adjust(5)
 
-    await bot.send_message(
-        chat_id,
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb.as_markup()
-    )
+    await bot.send_message(chat_id, text, reply_markup=kb.as_markup(), parse_mode=ParseMode.HTML)
 
-# === Генерация и отправка отчёта ===
-async def make_report(chat_id: int, data):
+# === Формирование и отправка отчёта ===
+
+async def generate_and_send(chat_id: int, data):
     name     = data["name"]
     ts       = data["start"]
     pharmacy = data.get("pharmacy", "Без названия")
@@ -225,18 +229,15 @@ async def make_report(chat_id: int, data):
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
+        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}\n"
+        f"Через Telegram-бот: @SadykhanQA"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharmacy
 
-    headers = [
-        "Блок", "Критерий", "Требование",
-        "Оценка участника", "Макс. оценка",
-        "Примечание", "Дата проверки"
-    ]
+    headers = ["Блок","Критерий","Требование","Оценка участника","Макс. оценка","Примечание","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
@@ -264,28 +265,29 @@ async def make_report(chat_id: int, data):
 
     filename = (
         f"{pharmacy}_{name}_"
-        f"{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx"
+        f"{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx"
     ).replace(" ", "_")
     wb.save(filename)
 
-    # 1) в QA-чат
+    # 1) Отправляем отчёт в QA-чат
     with open(filename, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f, filename))
-    # 2) копия пользователю
+    # 2) Копия пользователю
     with open(filename, "rb") as f:
         await bot.send_document(chat_id, FSInputFile(f, filename))
 
     os.remove(filename)
-    log_csv(pharmacy, name, ts, total_score, total_max)
+    log_submission(pharmacy, name, ts, total_score, total_max)
 
-    # финальное уведомление
+    # Финальное уведомление
     await bot.send_message(
         chat_id,
         "✅ Отчёт готов и отправлен в QA-чат.\n"
         "Чтобы пройти чек-лист ещё раз — нажмите /start"
     )
 
-# === Webhook & healthcheck ===
+# === Webhook и Healthcheck ===
+
 async def handle_webhook(request: web.Request):
     data = await request.json()
     upd  = Update(**data)
