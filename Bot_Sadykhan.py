@@ -1,3 +1,4 @@
+```python
 import logging
 import os
 import csv
@@ -18,9 +19,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
-from aiogram import executor
+import asyncio
 
-# === Конфиг ===
+# === Конфигурация ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
 CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
@@ -41,7 +42,7 @@ class Form(StatesGroup):
 
 # === Чтение чек-листа ===
 df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
-start_i = df[df.iloc[:,0]=="Блок"].index[0] + 1
+start_i = df[df.iloc[:,0] == "Блок"].index[0] + 1
 df = df.iloc[start_i:,:8].reset_index(drop=True)
 df.columns = [
     "Блок","Критерий","Требование","Оценка",
@@ -68,13 +69,13 @@ def now_ts():
 
 def log_csv(ph, nm, ts, sc, mx):
     first = not os.path.exists(LOG_PATH)
-    with open(LOG_PATH,"a",newline="",encoding="utf-8") as f:
-        w=csv.writer(f)
+    with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
         if first:
             w.writerow(["Дата","Аптека","ФИО","Баллы","Макс"])
-        w.writerow([ts,ph,nm,sc,mx])
+        w.writerow([ts, ph, nm, sc, mx])
 
-# === Инициализация ===
+# === Инициализация бота ===
 session = AiohttpSession()
 bot     = Bot(token=API_TOKEN,
               session=session,
@@ -128,7 +129,7 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.set_state(Form.rating)
     await send_q(msg.chat.id, state)
 
-# === Обработка кнопок ===
+# === Обработка inline-кнопок ===
 @dp.callback_query(F.data.startswith("score_") | F.data == "prev")
 async def cb_handler(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
@@ -148,13 +149,14 @@ async def cb_handler(cb: types.CallbackQuery, state: FSMContext):
         await state.set_data(data)
 
     await bot.edit_message_text(
-        cb.message.chat.id,
-        cb.message.message_id,
-        f"✅ Оценка: {sc} {'⭐'*sc}"
+        chat_id=cb.message.chat.id,
+        message_id=cb.message.message_id,
+        text=f"✅ Оценка: {sc} {'⭐'*sc}"
     )
+
     return await send_q(cb.from_user.id, state)
 
-# === Отправка вопроса ===
+# === Функция отправки вопроса ===
 async def send_q(uid: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
@@ -193,17 +195,14 @@ async def gen_report(uid: int, data):
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
+        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = ph
 
-    headers = [
-        "Блок", "Критерий", "Требование",
-        "Оценка", "Макс", "Примечание", "Дата"
-    ]
+    headers = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата"]
     for idx, h in enumerate(headers, start=1):
         ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
 
@@ -226,20 +225,17 @@ async def gen_report(uid: int, data):
     ws.cell(row+1,3,"ИТОГО:");    ws.cell(row+1,4,total_sc)
     ws.cell(row+2,3,"Максимум:"); ws.cell(row+2,4,total_mx)
 
-    fn = f"{ph}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}.xlsx"
-    fn = fn.replace(" ","_")
+    fn = f"{ph}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}.xlsx".replace(" ","_")
     wb.save(fn)
 
-    with open(fn,"rb") as f:
-        await bot.send_document(CHAT_ID, FSInputFile(f, fn))
-    with open(fn,"rb") as f:
-        await bot.send_document(uid, FSInputFile(f, fn))
-
+    with open(fn,"rb") as f: await bot.send_document(CHAT_ID, FSInputFile(f, fn))
+    with open(fn,"rb") as f: await bot.send_document(uid,    FSInputFile(f, fn))
     os.remove(fn)
     log_csv(ph, name, ts, total_sc, total_mx)
     await bot.send_message(uid, "✅ Отчёт готов! /start — чтобы ещё раз.")
 
-# === Запуск ===
+# === Старт polling ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    executor.start_polling(dp, skip_updates=True)
+    asyncio.run(dp.start_polling())
+```
