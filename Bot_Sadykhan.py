@@ -2,8 +2,6 @@ import logging
 import os
 import csv
 import pytz
-import asyncio
-
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -23,14 +21,14 @@ from aiogram.client.default import DefaultBotProperties
 
 from aiohttp import web
 
-# === ЗАГРУЗКА ОКРУЖЕНИЯ ===
+# === ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
 CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<app>.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<your-app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
 
 # === FSM СТЕЙТЫ ===
@@ -39,12 +37,15 @@ class Form(StatesGroup):
     pharmacy = State()
     rating   = State()
 
-# === ЗАГРУЗКА КРИТЕРИЕВ ===
+# === ЗАГРУЗКА КРИТЕРИЕВ ИЗ EXCEL ===
 criteria_df = pd.read_excel(CHECKLIST_PATH, sheet_name='Чек лист', header=None)
-start_i = criteria_df[criteria_df.iloc[:,0]=="Блок"].index[0] + 1
-criteria_df = criteria_df.iloc[start_i:,:8].reset_index(drop=True)
-criteria_df.columns = ["Блок","Критерий","Требование","Оценка","Макс. значение","Примечание","Дата проверки","Дата исправления"]
-criteria_df = criteria_df.dropna(subset=["Критерий","Требование"])
+start_i = criteria_df[criteria_df.iloc[:, 0] == "Блок"].index[0] + 1
+criteria_df = criteria_df.iloc[start_i:, :8].reset_index(drop=True)
+criteria_df.columns = [
+    "Блок", "Критерий", "Требование", "Оценка",
+    "Макс. значение", "Примечание", "Дата проверки", "Дата исправления"
+]
+criteria_df = criteria_df.dropna(subset=["Критерий", "Требование"])
 
 criteria_list = []
 last_block = None
@@ -69,10 +70,10 @@ def log_submission(pharmacy, name, ts, score, max_score):
     with open(LOG_PATH, 'a', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         if not exists:
-            w.writerow(["Дата","Аптека","ФИО","Баллы","Макс"])
+            w.writerow(["Дата", "Аптека", "ФИО", "Баллы", "Макс"])
         w.writerow([ts, pharmacy, name, score, max_score])
 
-# === ИНИЦИАЛИЗАЦИЯ БОТА ===
+# === ИНИЦИАЛИЗАЦИЯ БОТА И ДИСПЕТЧЕРА ===
 session = AiohttpSession()
 bot = Bot(
     token=API_TOKEN,
@@ -80,13 +81,19 @@ bot = Bot(
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 storage = MemoryStorage()
-dp = Dispatcher(storage=storage)
+dp = Dispatcher(bot=bot, storage=storage)
 
-# === ХЕНДЛЕРЫ ===
+# === ХЕНДЛЕРЫ ЧАТА ===
 @dp.message(F.text == "/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("📋 <b>Чек-лист посещения аптек</b>\nВведите ваше ФИО:", parse_mode=ParseMode.HTML)
+    intro = (
+        "📋 <b>Чек-лист посещения аптек</b>\n\n"
+        "Заполняйте внимательно, отчёт придёт автоматически.\n\n"
+        "🏁 Начнём!"
+    )
+    await msg.answer(intro, parse_mode=ParseMode.HTML)
+    await msg.answer("Введите ваше ФИО:")
     await state.set_state(Form.name)
 
 @dp.message(Form.name)
@@ -155,17 +162,17 @@ async def send_criterion(chat_id: int, state: FSMContext):
 
     await bot.send_message(chat_id, text, reply_markup=kb.as_markup(), parse_mode=ParseMode.HTML)
 
-async def generate_and_send(chat_id: int, session_data):
-    name  = session_data["name"]
-    ts    = session_data["start"]
-    pharm = session_data.get("pharmacy", "Без названия")
+async def generate_and_send(chat_id: int, data):
+    name  = data["name"]
+    ts    = data["start"]
+    pharm = data.get("pharmacy", "Без названия")
 
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
     title = (
         f"Отчёт по проверке аптеки\nИсполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
+        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
@@ -180,25 +187,22 @@ async def generate_and_send(chat_id: int, session_data):
     row = 6
     total = 0
     total_max = 0
-    for item in session_data["data"]:
-        c = item["crit"]
-        sc = item["score"]
-        ws.cell(row,1,c["block"])
-        ws.cell(row,2,c["criterion"])
-        ws.cell(row,3,c["requirement"])
-        ws.cell(row,4,sc)
-        ws.cell(row,5,c["max"])
-        ws.cell(row,7,ts)
+    for item in data["data"]:
+        c = item["crit"]; sc = item["score"]
+        ws.cell(row, 1, c["block"])
+        ws.cell(row, 2, c["criterion"])
+        ws.cell(row, 3, c["requirement"])
+        ws.cell(row, 4, sc)
+        ws.cell(row, 5, c["max"])
+        ws.cell(row, 7, ts)
         total += sc
         total_max += c["max"]
         row += 1
 
-    ws.cell(row+1,3,"ИТОГО:")
-    ws.cell(row+1,4,total)
-    ws.cell(row+2,3,"Максимум:")
-    ws.cell(row+2,4,total_max)
+    ws.cell(row+1, 3, "ИТОГО:");    ws.cell(row+1, 4, total)
+    ws.cell(row+2, 3, "Максимум:"); ws.cell(row+2, 4, total_max)
 
-    filename = f"{pharm}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ","_")
+    filename = f"{pharm}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ", "_")
     wb.save(filename)
     with open(filename, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f))
@@ -206,14 +210,17 @@ async def generate_and_send(chat_id: int, session_data):
     log_submission(pharm, name, ts, total, total_max)
     await bot.send_message(chat_id, "Готово! /start — чтобы заново.")
 
-# === Webhook handler ===
+# === Webhook handler и Health-check===
 async def handle_webhook(request: web.Request):
     data = await request.json()
     update = Update(**data)
-    await dp.process_update(update)
+    await dp.feed_update(update=update)
     return web.Response(text="OK")
 
-# === Запуск AioHTTP-сервера и Webhook ===
+async def health(request: web.Request):
+    return web.Response(text="OK")
+
+# === Запуск AioHTTP и Webhook ===
 async def on_startup(app: web.Application):
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
 
@@ -222,6 +229,7 @@ async def on_cleanup(app: web.Application):
     await storage.close()
 
 app = web.Application()
+app.router.add_get("/", health)
 app.router.add_post("/webhook", handle_webhook)
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
