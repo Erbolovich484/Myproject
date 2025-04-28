@@ -24,11 +24,11 @@ from aiohttp import web
 # === Загрузка конфигурации ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
-CHAT_ID        = int(os.getenv("CHAT_ID", "0"))  # QA-чат
+CHAT_ID        = int(os.getenv("CHAT_ID", "0"))       # QA-чат
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")        # https://<app>.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")             # https://<app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
 
 # === Разрешённые пользователи ===
@@ -47,13 +47,13 @@ class Form(StatesGroup):
     pharmacy = State()
     rating   = State()
 
-# === Чтение исходного чек-листа ===
+# === Чтение критериев из Excel ===
 df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
 start_i = df[df.iloc[:,0] == "Блок"].index[0] + 1
 df = df.iloc[start_i:,:8].reset_index(drop=True)
 df.columns = [
-    "Блок", "Критерий", "Требование", "Оценка",
-    "Макс. значение", "Примечание", "Дата проверки", "Дата исправления"
+    "Блок","Критерий","Требование","Оценка",
+    "Макс. значение","Примечание","Дата проверки","Дата исправления"
 ]
 df = df.dropna(subset=["Критерий","Требование"])
 
@@ -72,8 +72,7 @@ for _, r in df.iterrows():
 
 # === Утилиты ===
 def get_time():
-    tz = pytz.timezone("Asia/Almaty")
-    return datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(pytz.timezone("Asia/Almaty")).strftime("%Y-%m-%d %H:%M:%S")
 
 def log_csv(pharmacy, name, ts, score, max_score):
     exists = os.path.exists(LOG_PATH)
@@ -94,13 +93,15 @@ storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
 # === Хэндлеры команд ===
+
 @dp.message(F.text == "/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
         "📋 <b>Чек-лист посещения аптек</b>\n\n"
-        "Заполняйте внимательно — отчёт придёт автоматически.\n\n"
-        "✅ По завершении — отчёт в Excel.\n\n"
+        "Этот инструмент предназначен для оценки соответствия аптек стандартам работы ГК «Садыхан».\n"
+        "🧠 Заполняйте чек-лист вдумчиво и внимательно.\n\n"
+        "✅ По завершению будет сформирован автоматический отчёт в Excel и отправлен в QA-чат.\n\n"
         "🏁 Введите ваше ФИО для авторизации:",
         parse_mode=ParseMode.HTML
     )
@@ -120,19 +121,15 @@ async def cmd_log(msg: types.Message):
 @dp.message(F.text == "/сброс")
 async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("Состояние сброшено. /start — чтобы начать заново.")
+    await msg.answer("Состояние сброшено. Чтобы начать заново — /start")
 
-# === Авторизация и запуск чек-листа ===
+# === Авторизация и начало чек-листа ===
+
 @dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
     user = msg.text.strip()
     if user in ALLOWED_USERS or "*" in ALLOWED_USERS:
-        await state.update_data(
-            name=user,
-            step=0,
-            data=[],
-            start=get_time()
-        )
+        await state.update_data(name=user, step=0, data=[], start=get_time())
         await msg.answer("Введите название аптеки:")
         await state.set_state(Form.pharmacy)
     else:
@@ -141,65 +138,61 @@ async def proc_name(msg: types.Message, state: FSMContext):
 @dp.message(Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
-    await msg.answer("Начинаем проверку…")
+    await msg.answer("Спасибо! Начинаем проверку…")
     await state.set_state(Form.rating)
-    await send_quest(msg.chat.id, state)
+    await send_question(msg.chat.id, state)
 
-# === Обработка нажатий кнопок (callback_query) ===
-@dp.callback_query()
-async def cb_all(cb: types.CallbackQuery, state: FSMContext):
-    # отвечаем Telegram сразу, чтобы не было "query is too old"
-    try:
-        await cb.answer()
-    except:
-        pass
+# === Обработка нажатий кнопок ===
+
+@dp.callback_query(F.data.startswith("score_") | F.data == "prev")
+async def callback_handler(cb: types.CallbackQuery, state: FSMContext):
+    # Первый — cb.answer, чтобы Telegram не timeout’ил
+    await cb.answer()
 
     data = await state.get_data()
     step = data.get("step", 0)
 
-    # Назад
+    # Кнопка «Назад»
     if cb.data == "prev" and step > 0:
         data["step"] -= 1
         data["data"].pop()
         await state.set_data(data)
-        return await send_quest(cb.from_user.id, state)
+        return await send_question(cb.from_user.id, state)
 
     # Оценка
-    if cb.data and cb.data.startswith("score_"):
-        score = int(cb.data.split("_")[1])
-        if step < len(criteria):
-            data.setdefault("data", []).append({
-                "crit": criteria[step],
-                "score": score
-            })
-            data["step"] += 1
-            await state.set_data(data)
+    score = int(cb.data.split("_")[1])
+    if step < len(criteria):
+        data.setdefault("data", []).append({"crit": criteria[step], "score": score})
+        data["step"] += 1
+        await state.set_data(data)
 
-        # редактируем предыдущее сообщение
-        await bot.edit_message_text(
-            chat_id=cb.message.chat.id,
-            message_id=cb.message.message_id,
-            text=f"✅ Оценка: {score} {'⭐'*score}"
-        )
-        return await send_quest(cb.from_user.id, state)
+    # Редактируем предыдущее сообщение
+    await bot.edit_message_text(
+        chat_id=cb.message.chat.id,
+        message_id=cb.message.message_id,
+        text=f"✅ Оценка: {score} {'⭐'*score}"
+    )
 
-# === Функция отправки следующего вопроса ===
-async def send_quest(chat_id: int, state: FSMContext):
+    return await send_question(cb.from_user.id, state)
+
+# === Отправка следующего вопроса ===
+
+async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
     total = len(criteria)
 
     if step >= total:
         await bot.send_message(chat_id, "Проверка завершена. Формируем отчёт…")
-        return await make_report(chat_id, data)
+        return await generate_and_send(chat_id, data)
 
     c = criteria[step]
     text = (
         f"<b>Вопрос {step+1} из {total}</b>\n\n"
-        f"<b>Блок:</b> {c['block']}\n"
-        f"<b>Критерий:</b> {c['criterion']}\n"
-        f"<b>Требование:</b> {c['requirement']}\n"
-        f"<b>Макс. балл:</b> {c['max']}"
+        f"<b>Блок:</b> {c['block']}\n\n"
+        f"<b>Критерий:</b> {c['criterion']}\n\n"
+        f"<b>Требование:</b> {c['requirement']}\n\n"
+        f"Макс. балл: {c['max']}"
     )
 
     kb = InlineKeyboardBuilder()
@@ -210,15 +203,11 @@ async def send_quest(chat_id: int, state: FSMContext):
         kb.button(text="◀️ Назад", callback_data="prev")
     kb.adjust(5)
 
-    await bot.send_message(
-        chat_id,
-        text,
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb.as_markup()
-    )
+    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
 
 # === Генерация и отправка отчёта ===
-async def make_report(chat_id: int, data):
+
+async def generate_and_send(chat_id: int, data):
     name     = data["name"]
     ts       = data["start"]
     pharmacy = data.get("pharmacy", "Без названия")
@@ -229,18 +218,15 @@ async def make_report(chat_id: int, data):
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
+        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}\n"
+        f"Оформлен через Telegram-бот: @SadykhanQA"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharmacy
 
-    headers = [
-        "Блок", "Критерий", "Требование",
-        "Оценка участника", "Макс. оценка",
-        "Примечание", "Дата проверки"
-    ]
+    headers = ["Блок","Критерий","Требование","Оценка участника","Макс. оценка","Примечание","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
@@ -268,28 +254,29 @@ async def make_report(chat_id: int, data):
 
     filename = (
         f"{pharmacy}_{name}_"
-        f"{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx"
+        f"{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx"
     ).replace(" ", "_")
     wb.save(filename)
 
-    # 1) Отправляем в QA-чат
+    # — отправляем в QA-чат
     with open(filename, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f, filename))
-    # 2) Дублируем пользователю
+    # — дублируем пользователю
     with open(filename, "rb") as f:
         await bot.send_document(chat_id, FSInputFile(f, filename))
 
     os.remove(filename)
     log_csv(pharmacy, name, ts, total_score, total_max)
 
-    # Финальное уведомление
+    # финальное сообщение
     await bot.send_message(
         chat_id,
         "✅ Отчёт готов и отправлен в QA-чат.\n"
         "Чтобы пройти чек-лист ещё раз — нажмите /start"
     )
 
-# === Webhook & healthcheck ===
+# === Webhook & Healthcheck ===
+
 async def handle_webhook(request: web.Request):
     data = await request.json()
     upd  = Update(**data)
@@ -300,11 +287,8 @@ async def health(request: web.Request):
     return web.Response(text="OK")
 
 async def on_startup(app: web.Application):
-    await bot.set_webhook(
-        WEBHOOK_URL,
-        drop_pending_updates=True,
-        allowed_updates=[]
-    )
+    # пустой allowed_updates — Telegram шлёт всё, включая callback_query
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True, allowed_updates=[])
 
 async def on_cleanup(app: web.Application):
     await bot.delete_webhook()
