@@ -248,4 +248,4 @@ async def gen_report(uid: int, data):
 # === Старт polling ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(dp.start_polling())
+    asyncio.run(dp.start_polling(bot))
