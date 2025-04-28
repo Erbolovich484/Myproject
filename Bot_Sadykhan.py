@@ -75,7 +75,7 @@ def log_csv(pharmacy: str, name: str, ts: str, score: int, max_score: int):
             w.writerow(["Дата","Аптека","ФИО","Баллы","Макс"])
         w.writerow([ts, pharmacy, name, score, max_score])
 
-# === Инициализация ===
+# === Инициализация бота ===
 session = AiohttpSession()
 bot = Bot(
     token=API_TOKEN,
@@ -143,7 +143,7 @@ async def cb_handler(cb: types.CallbackQuery, state: FSMContext):
         )
         return await send_question(cb.from_user.id, state)
 
-# === Отправка вопросов ===
+# === Отправка вопросов (с логами и защитой) ===
 async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
@@ -155,13 +155,14 @@ async def send_question(chat_id: int, state: FSMContext):
         return await state.set_state(Form.conclusion)
 
     c = criteria[step]
+    logging.debug(f"Criterion #{step+1}: block={c['block']!r}, max={c['max']}")
+
     text = (
         f"<b>Вопрос {step+1} из {total}</b>\n\n"
         f"<b>Блок:</b> {c['block']}\n"
         f"<b>Критерий:</b> {c['criterion']}\n"
         f"<b>Требование:</b> {c['requirement']}\n"
-        f"<b>Макс. балл:</b> {c['max']}\n\n"
-        "▶️ Нажмите кнопку ниже"
+        f"<b>Макс. балл:</b> {c['max']}"
     )
 
     kb = InlineKeyboardBuilder()
@@ -172,7 +173,16 @@ async def send_question(chat_id: int, state: FSMContext):
         kb.button(text="◀️ Назад", callback_data="prev")
     kb.adjust(5)
 
-    await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
+    try:
+        await bot.send_message(
+            chat_id,
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=kb.as_markup()
+        )
+        logging.debug("Question sent successfully")
+    except Exception as e:
+        logging.error(f"Failed to send question #{step+1}: {e}", exc_info=True)
 
 # === Сбор вывода и генерация отчёта ===
 @dp.message(Form.conclusion)
@@ -181,7 +191,6 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
     await state.update_data(conclusion=msg.text.strip())
     data = await state.get_data()
 
-    # Подготовка Excel
     ts      = data["start"]
     name    = data["name"]
     pharm   = data["pharmacy"]
@@ -191,7 +200,6 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    # Заголовок
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
@@ -202,13 +210,11 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharm
 
-    # Шапка таблицы
     headers = ["Блок","Критерий","Требование","Баллы","Макс","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
 
-    # Ответы
     row = 6
     total_score = 0
     total_max   = 0
@@ -225,18 +231,15 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
         total_max   += c["max"]
         row += 1
 
-    # Итоги
     ws.cell(row+1, 3, "ИТОГО:")
     ws.cell(row+1, 4, total_score)
     ws.cell(row+2, 3, "Максимум:")
     ws.cell(row+2, 4, total_max)
 
-    # Вывод аудитора
     ws.cell(row+4, 1, "Вывод аудитора:")
     ws.merge_cells(start_row=row+4, start_column=2, end_row=row+4, end_column=7)
     ws.cell(row+4, 2, concl)
 
-    # Сохранение и отправка
     fn = f"{pharm}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}.xlsx".replace(" ","_")
     wb.save(fn)
 
@@ -251,10 +254,10 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
     await msg.answer("🎉 Отчёт отправлен в QA-чат и вам.\nЧтобы пройти снова — /start")
     await state.clear()
 
-# === Webhook & Healthcheck ===
+# === Webhook & healthcheck ===
 async def handle_webhook(request: web.Request):
     data = await request.json()
-    upd = Update(**data)
+    upd  = Update(**data)
     await dp.feed_update(bot=bot, update=upd)
     return web.Response(text="OK")
 
