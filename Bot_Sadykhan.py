@@ -21,15 +21,25 @@ from aiogram.client.default import DefaultBotProperties
 
 from aiohttp import web
 
-# === ЗАГРУЗКА ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ===
+# === ЗАГРУЗКА ОКРУЖЕНИЯ ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
 CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<your-app>.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # e.g. https://myapp.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
+
+# === СПИСОК РАЗРЕШЁННЫХ ===
+ALLOWED_USERS = [
+    "Николай Крылов",
+    "Таждин Усейн",
+    "Жанар Бөлтірік",
+    "Шара Абдиева",
+    "Тохтар Чарабасов",
+    "*"
+]
 
 # === FSM СТЕЙТЫ ===
 class Form(StatesGroup):
@@ -37,7 +47,7 @@ class Form(StatesGroup):
     pharmacy = State()
     rating   = State()
 
-# === ЗАГРУЗКА КРИТЕРИЕВ ИЗ EXCEL ===
+# === ЧТЕНИЕ КРИТЕРИЕВ ИЗ EXCEL ===
 criteria_df = pd.read_excel(CHECKLIST_PATH, sheet_name='Чек лист', header=None)
 start_i = criteria_df[criteria_df.iloc[:, 0] == "Блок"].index[0] + 1
 criteria_df = criteria_df.iloc[start_i:, :8].reset_index(drop=True)
@@ -70,7 +80,7 @@ def log_submission(pharmacy, name, ts, score, max_score):
     with open(LOG_PATH, 'a', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         if not exists:
-            w.writerow(["Дата", "Аптека", "ФИО", "Баллы", "Макс"])
+            w.writerow(["Дата", "Аптека", "ФИО проверяющего", "Факт", "Макс. балл"])
         w.writerow([ts, pharmacy, name, score, max_score])
 
 # === ИНИЦИАЛИЗАЦИЯ БОТА И ДИСПЕТЧЕРА ===
@@ -83,37 +93,61 @@ bot = Bot(
 storage = MemoryStorage()
 dp = Dispatcher(bot=bot, storage=storage)
 
-# === ХЕНДЛЕРЫ ЧАТА ===
+# === ОБЩИЕ КОМАНДЫ ===
 @dp.message(F.text == "/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     intro = (
         "📋 <b>Чек-лист посещения аптек</b>\n\n"
-        "Заполняйте внимательно, отчёт придёт автоматически.\n\n"
+        "Этот инструмент для оценки соответствия аптек стандартам ГК «Садыхан».\n"
+        "🧠 Заполняйте внимательно.\n\n"
+        "✅ По завершении — отчёт в Excel.\n"
         "🏁 Начнём!"
     )
-    await msg.answer(intro, parse_mode=ParseMode.HTML)
-    await msg.answer("Введите ваше ФИО:")
+    await msg.answer(intro)
+    await msg.answer("Введите ваше ФИО для авторизации:")
     await state.set_state(Form.name)
 
+@dp.message(F.text == "/id")
+async def cmd_id(msg: types.Message):
+    await msg.answer(f"Ваш chat_id: <code>{msg.chat.id}</code>", parse_mode=ParseMode.HTML)
+
+@dp.message(F.text == "/лог")
+async def cmd_log(msg: types.Message):
+    if os.path.exists(LOG_PATH):
+        await msg.answer_document(FSInputFile(LOG_PATH))
+    else:
+        await msg.answer("Лог ещё не сформирован.")
+
+@dp.message(F.text == "/сброс")
+async def cmd_reset(msg: types.Message, state: FSMContext):
+    await state.clear()
+    await msg.answer("Состояние сброшено. Чтобы начать заново — /start")
+
+# === АВТОРИЗАЦИЯ И НАЧАЛО ЧЕК-ЛИСТА ===
 @dp.message(Form.name)
-async def name_handler(msg: types.Message, state: FSMContext):
-    await state.update_data(name=msg.text.strip(), step=0, data=[], start=get_astana_time())
-    await msg.answer("Введите название аптеки:")
-    await state.set_state(Form.pharmacy)
+async def process_name(msg: types.Message, state: FSMContext):
+    user_name = msg.text.strip()
+    if user_name in ALLOWED_USERS or "*" in ALLOWED_USERS:
+        await state.update_data(name=user_name, step=0, data=[], start=get_astana_time())
+        await msg.answer("Введите название аптеки:")
+        await state.set_state(Form.pharmacy)
+    else:
+        await msg.answer("ФИО не распознано. Обратитесь в ИТ-отдел.")
 
 @dp.message(Form.pharmacy)
-async def pharmacy_handler(msg: types.Message, state: FSMContext):
+async def process_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_criterion(msg.chat.id, state)
 
+# === ОБРАБОТКА ОЦЕНОК ===
 @dp.callback_query(F.data.startswith("score_") | F.data == "prev")
 async def score_handler(cb: types.CallbackQuery, state: FSMContext):
-    await cb.answer()
+    await cb.answer("✔️ Принято")
     data = await state.get_data()
-    step = data["step"]
+    step = data.get("step", 0)
 
     if cb.data == "prev" and step > 0:
         data["step"] -= 1
@@ -134,6 +168,7 @@ async def score_handler(cb: types.CallbackQuery, state: FSMContext):
     )
     await send_criterion(cb.from_user.id, state)
 
+# === ОТРАВКА ВОПРОСА ===
 async def send_criterion(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
@@ -141,14 +176,16 @@ async def send_criterion(chat_id: int, state: FSMContext):
 
     if step >= total:
         await bot.send_message(chat_id, "Проверка завершена. Формируем отчёт…")
-        return await generate_and_send(chat_id, data)
+        await generate_and_send(chat_id, data)
+        await bot.send_message(chat_id, "Готово! Чтобы заново — /start")
+        return await state.clear()
 
     c = criteria_list[step]
     text = (
         f"<b>Вопрос {step+1} из {total}</b>\n\n"
-        f"<b>Блок:</b> {c['block']}\n"
-        f"<b>Критерий:</b> {c['criterion']}\n"
-        f"<b>Требование:</b> {c['requirement']}\n"
+        f"<b>Блок:</b> {c['block']}\n\n"
+        f"<b>Критерий:</b> {c['criterion']}\n\n"
+        f"<b>Требование:</b> {c['requirement']}\n\n"
         f"<b>Макс. балл:</b> {c['max']}"
     )
 
@@ -162,6 +199,7 @@ async def send_criterion(chat_id: int, state: FSMContext):
 
     await bot.send_message(chat_id, text, reply_markup=kb.as_markup(), parse_mode=ParseMode.HTML)
 
+# === ФОРМИРОВАНИЕ И ОТПРАВКА ОТЧЁТА ===
 async def generate_and_send(chat_id: int, data):
     name  = data["name"]
     ts    = data["start"]
@@ -170,8 +208,10 @@ async def generate_and_send(chat_id: int, data):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
+    # Заголовок
     title = (
-        f"Отчёт по проверке аптеки\nИсполнитель: {name}\n"
+        f"Отчёт по проверке аптеки\n"
+        f"Исполнитель: {name}\n"
         f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
     )
     ws.merge_cells("A1:G2")
@@ -179,48 +219,56 @@ async def generate_and_send(chat_id: int, data):
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharm
 
-    headers = ["Блок","Критерий","Требование","Баллы","Макс","Примечание","Дата"]
+    # Шапка
+    headers = ["Блок","Критерий","Требование","Оценка участника","Макс. оценка","Примечание","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
 
+    # Данные
     row = 6
-    total = 0
-    total_max = 0
+    total_score = 0
+    total_max   = 0
     for item in data["data"]:
-        c = item["crit"]; sc = item["score"]
+        c  = item["crit"]
+        sc = item["score"]
         ws.cell(row, 1, c["block"])
         ws.cell(row, 2, c["criterion"])
         ws.cell(row, 3, c["requirement"])
         ws.cell(row, 4, sc)
         ws.cell(row, 5, c["max"])
         ws.cell(row, 7, ts)
-        total += sc
-        total_max += c["max"]
+        total_score += sc
+        total_max   += c["max"]
         row += 1
 
-    ws.cell(row+1, 3, "ИТОГО:");    ws.cell(row+1, 4, total)
-    ws.cell(row+2, 3, "Максимум:"); ws.cell(row+2, 4, total_max)
+    ws.cell(row+1, 3, "ИТОГО:")
+    ws.cell(row+1, 4, total_score)
+    ws.cell(row+2, 3, "Максимум:")
+    ws.cell(row+2, 4, total_max)
 
-    filename = f"{pharm}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ", "_")
-    wb.save(filename)
-    with open(filename, "rb") as f:
+    fname = f"{pharm}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ", "_")
+    wb.save(fname)
+
+    # Отправка в общий чат
+    with open(fname, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f))
-    os.remove(filename)
-    log_submission(pharm, name, ts, total, total_max)
-    await bot.send_message(chat_id, "Готово! /start — чтобы заново.")
+    os.remove(fname)
 
-# === Webhook handler и Health-check===
+    # Лог в CSV
+    log_submission(pharm, name, ts, total_score, total_max)
+
+# === WEBHOOK И HEALTHCHECK ===
 async def handle_webhook(request: web.Request):
     data = await request.json()
     update = Update(**data)
-    await dp.feed_update(update=update)
+    # feed_update требует bot и именованный update
+    await dp.feed_update(bot=bot, update=update)
     return web.Response(text="OK")
 
 async def health(request: web.Request):
     return web.Response(text="OK")
 
-# === Запуск AioHTTP и Webhook ===
 async def on_startup(app: web.Application):
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
 
