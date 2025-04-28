@@ -122,7 +122,7 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer("Состояние сброшено. /start — чтобы начать заново.")
 
-# === Авторизация и запуск чек-листа ===
+# === Авторизация и начало чек-листа ===
 @dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
     user = msg.text.strip()
@@ -145,10 +145,9 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.set_state(Form.rating)
     await send_quest(msg.chat.id, state)
 
-# === Обработка нажатий кнопок (callback_query) ===
-@dp.callback_query()
+# === Обработка нажатий кнопок ===
+@dp.callback_query(F.data.startswith("score_") | F.data == "prev")
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
-    # отвечаем Telegram сразу, чтобы не было "query is too old"
     try:
         await cb.answer()
     except:
@@ -165,25 +164,23 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         return await send_quest(cb.from_user.id, state)
 
     # Оценка
-    if cb.data and cb.data.startswith("score_"):
-        score = int(cb.data.split("_")[1])
-        if step < len(criteria):
-            data.setdefault("data", []).append({
-                "crit": criteria[step],
-                "score": score
-            })
-            data["step"] += 1
-            await state.set_data(data)
+    score = int(cb.data.split("_")[1])
+    if step < len(criteria):
+        data.setdefault("data", []).append({
+            "crit": criteria[step],
+            "score": score
+        })
+        data["step"] += 1
+        await state.set_data(data)
 
-        # редактируем предыдущее сообщение
-        await bot.edit_message_text(
-            chat_id=cb.message.chat.id,
-            message_id=cb.message.message_id,
-            text=f"✅ Оценка: {score} {'⭐'*score}"
-        )
-        return await send_quest(cb.from_user.id, state)
+    await bot.edit_message_text(
+        chat_id=cb.message.chat.id,
+        message_id=cb.message.message_id,
+        text=f"✅ Оценка: {score} {'⭐'*score}"
+    )
+    return await send_quest(cb.from_user.id, state)
 
-# === Функция отправки следующего вопроса ===
+# === Отправка следующего вопроса ===
 async def send_quest(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
@@ -201,7 +198,6 @@ async def send_quest(chat_id: int, state: FSMContext):
         f"<b>Требование:</b> {c['requirement']}\n"
         f"<b>Макс. балл:</b> {c['max']}"
     )
-
     kb = InlineKeyboardBuilder()
     start = 0 if c["max"] == 1 else 1
     for i in range(start, c["max"] + 1):
@@ -272,17 +268,17 @@ async def make_report(chat_id: int, data):
     ).replace(" ", "_")
     wb.save(filename)
 
-    # 1) Отправляем в QA-чат
+    # 1) в QA-чат
     with open(filename, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f, filename))
-    # 2) Дублируем пользователю
+    # 2) копия пользователю
     with open(filename, "rb") as f:
         await bot.send_document(chat_id, FSInputFile(f, filename))
 
     os.remove(filename)
     log_csv(pharmacy, name, ts, total_score, total_max)
 
-    # Финальное уведомление
+    # финальное уведомление
     await bot.send_message(
         chat_id,
         "✅ Отчёт готов и отправлен в QA-чат.\n"
@@ -303,7 +299,7 @@ async def on_startup(app: web.Application):
     await bot.set_webhook(
         WEBHOOK_URL,
         drop_pending_updates=True,
-        allowed_updates=[]
+        allowed_updates=["message", "callback_query"]
     )
 
 async def on_cleanup(app: web.Application):
