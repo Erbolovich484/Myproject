@@ -14,7 +14,7 @@ from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import RedisStorage, default_key_builder
 from aiogram.types import FSInputFile, Update
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
@@ -36,6 +36,7 @@ CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лис
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
 WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
+REDIS_URL      = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # === FSM-состояния ===
 class Form(StatesGroup):
@@ -82,7 +83,7 @@ bot = Bot(
     session=session,
     default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
-storage = MemoryStorage()
+storage = RedisStorage.from_url(REDIS_URL, key_builder=default_key_builder)
 dp = Dispatcher(bot=bot, storage=storage)
 
 # === /start ===
@@ -120,7 +121,7 @@ async def pharm_handler(msg: types.Message, state: FSMContext):
 @dp.callback_query()
 async def cb_handler(cb: types.CallbackQuery, state: FSMContext):
     logging.debug(f"Callback received: {cb.data}")
-    await cb.answer()  # сброс таймаута
+    await cb.answer()
     data = await state.get_data()
     step = data.get("step", 0)
 
@@ -143,20 +144,19 @@ async def cb_handler(cb: types.CallbackQuery, state: FSMContext):
         )
         return await send_question(cb.from_user.id, state)
 
-# === Отправка вопросов (с логами и защитой) ===
+# === Отправка вопросов ===
 async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
     total = len(criteria)
-    logging.debug(f"send_question: step={step}/{total} to {chat_id}")
+    logging.debug(f"send_question: step={step}/{total}")
 
     if step >= total:
         await bot.send_message(chat_id, "✅ Проверка завершена. Введите, пожалуйста, вывод по аптеке:")
         return await state.set_state(Form.conclusion)
 
     c = criteria[step]
-    logging.debug(f"Criterion #{step+1}: block={c['block']!r}, max={c['max']}")
-
+    logging.debug(f"Criterion #{step+1}: max={c['max']}")
     text = (
         f"<b>Вопрос {step+1} из {total}</b>\n\n"
         f"<b>Блок:</b> {c['block']}\n"
@@ -164,7 +164,6 @@ async def send_question(chat_id: int, state: FSMContext):
         f"<b>Требование:</b> {c['requirement']}\n"
         f"<b>Макс. балл:</b> {c['max']}"
     )
-
     kb = InlineKeyboardBuilder()
     start = 0 if c["max"] == 1 else 1
     for i in range(start, c["max"]+1):
@@ -174,23 +173,17 @@ async def send_question(chat_id: int, state: FSMContext):
     kb.adjust(5)
 
     try:
-        await bot.send_message(
-            chat_id,
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=kb.as_markup()
-        )
+        await bot.send_message(chat_id, text, parse_mode=ParseMode.HTML, reply_markup=kb.as_markup())
         logging.debug("Question sent successfully")
     except Exception as e:
         logging.error(f"Failed to send question #{step+1}: {e}", exc_info=True)
 
-# === Сбор вывода и генерация отчёта ===
+# === Сбор вывода и отчёта ===
 @dp.message(Form.conclusion)
 async def conclusion_handler(msg: types.Message, state: FSMContext):
     logging.debug(f"Received conclusion: {msg.text!r}")
     await state.update_data(conclusion=msg.text.strip())
     data = await state.get_data()
-
     ts      = data["start"]
     name    = data["name"]
     pharm   = data["pharmacy"]
@@ -203,7 +196,7 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
+        f"Дата: {datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
@@ -212,8 +205,7 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
 
     headers = ["Блок","Критерий","Требование","Баллы","Макс","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
-        cell = ws.cell(row=5, column=idx, value=h)
-        cell.font = Font(bold=True)
+        ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
 
     row = 6
     total_score = 0
@@ -231,27 +223,25 @@ async def conclusion_handler(msg: types.Message, state: FSMContext):
         total_max   += c["max"]
         row += 1
 
-    ws.cell(row+1, 3, "ИТОГО:")
-    ws.cell(row+1, 4, total_score)
-    ws.cell(row+2, 3, "Максимум:")
-    ws.cell(row+2, 4, total_max)
+    ws.cell(row+1,3,"ИТОГО:")
+    ws.cell(row+1,4,total_score)
+    ws.cell(row+2,3,"Максимум:")
+    ws.cell(row+2,4,total_max)
 
-    ws.cell(row+4, 1, "Вывод аудитора:")
+    ws.cell(row+4,1,"Вывод аудитора:")
     ws.merge_cells(start_row=row+4, start_column=2, end_row=row+4, end_column=7)
-    ws.cell(row+4, 2, concl)
+    ws.cell(row+4,2, concl)
 
     fn = f"{pharm}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}.xlsx".replace(" ","_")
     wb.save(fn)
 
-    with open(fn, "rb") as f:
-        await bot.send_document(QA_CHAT_ID, FSInputFile(f, filename=fn))
-    with open(fn, "rb") as f:
-        await bot.send_document(msg.chat.id, FSInputFile(f, filename=fn))
+    for target in (QA_CHAT_ID, msg.chat.id):
+        with open(fn, "rb") as f:
+            await bot.send_document(target, FSInputFile(f, filename=fn))
 
     os.remove(fn)
     log_csv(pharm, name, ts, total_score, total_max)
-
-    await msg.answer("🎉 Отчёт отправлен в QA-чат и вам.\nЧтобы пройти снова — /start")
+    await msg.answer("🎉 Отчёт отправлен. Чтобы пройти снова — /start")
     await state.clear()
 
 # === Webhook & healthcheck ===
