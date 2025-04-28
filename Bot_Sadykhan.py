@@ -245,13 +245,35 @@ async def gen_report(uid: int, data):
         "Чтобы пройти чек-лист ещё раз — нажмите /start"
     )
 
-# === Старт polling ===
+# === Webhook & healthcheck ===
+from aiohttp import web
+
+async def handle_webhook(request: web.Request):
+    data = await request.json()
+    update = types.Update(**data)
+    await dp.feed_update(bot=bot, update=update)
+    return web.Response(text="OK")
+
+async def health(request: web.Request):
+    return web.Response(text="OK")
+
+async def on_startup(app: web.Application):
+    await bot.set_webhook(
+        os.getenv("WEBHOOK_URL"),
+        drop_pending_updates=True,
+        allowed_updates=["message","callback_query"]
+    )
+
+async def on_cleanup(app: web.Application):
+    await bot.delete_webhook()
+    await storage.close()
+
+app = web.Application()
+app.router.add_get("/", health)
+app.router.add_post("/webhook", handle_webhook)
+app.on_startup.append(on_startup)
+app.on_cleanup.append(on_cleanup)
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    async def main():
-        # Удаляем webhook, чтобы использовать polling
-        await bot.delete_webhook(drop_pending_updates=True)
-        # Запускаем polling
-        await dp.start_polling(bot, skip_updates=True)
-
-    asyncio.run(main())
+    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", "8000")))
