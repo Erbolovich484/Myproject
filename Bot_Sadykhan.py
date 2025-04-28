@@ -1,4 +1,3 @@
-```python
 import logging
 import os
 import csv
@@ -24,7 +23,7 @@ import asyncio
 # === Конфигурация ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
-CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
+CHAT_ID        = int(os.getenv("CHAT_ID", "0"))  # QA-чат
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
@@ -195,14 +194,14 @@ async def gen_report(uid: int, data):
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
-        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}"
+        f"Дата: {datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}"
     )
     ws.merge_cells("A1:G2")
     ws["A1"] = title
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = ph
 
-    headers = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата"]
+    headers = ["Блок","Критерий","Требование","Оценка участника","Макс. оценка","Примечание","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
 
@@ -222,20 +221,31 @@ async def gen_report(uid: int, data):
         total_mx += cinfo["max"]
         row += 1
 
-    ws.cell(row+1,3,"ИТОГО:");    ws.cell(row+1,4,total_sc)
-    ws.cell(row+2,3,"Максимум:"); ws.cell(row+2,4,total_mx)
+    ws.cell(row+1,3,"ИТОГО:")
+    ws.cell(row+1,4,total_sc)
+    ws.cell(row+2,3,"Максимум:")
+    ws.cell(row+2,4,total_mx)
 
-    fn = f"{ph}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d%m%Y')}.xlsx".replace(" ","_")
-    wb.save(fn)
+    filename = f"{ph}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ","_")
+    wb.save(filename)
 
-    with open(fn,"rb") as f: await bot.send_document(CHAT_ID, FSInputFile(f, fn))
-    with open(fn,"rb") as f: await bot.send_document(uid,    FSInputFile(f, fn))
-    os.remove(fn)
+    # Отправка в QA-чат
+    with open(filename, "rb") as f:
+        await bot.send_document(CHAT_ID, FSInputFile(f, filename))
+    # Копия пользователю
+    with open(filename, "rb") as f:
+        await bot.send_document(uid, FSInputFile(f, filename))
+
+    os.remove(filename)
     log_csv(ph, name, ts, total_sc, total_mx)
-    await bot.send_message(uid, "✅ Отчёт готов! /start — чтобы ещё раз.")
+
+    # Финальное сообщение
+    await bot.send_message(uid,
+        "✅ Отчёт готов и отправлен в QA-чат.\n"
+        "Чтобы пройти чек-лист ещё раз — нажмите /start"
+    )
 
 # === Старт polling ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     asyncio.run(dp.start_polling())
-```
