@@ -28,10 +28,10 @@ CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
-WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # e.g. https://myapp.onrender.com/webhook
+WEBHOOK_URL    = os.getenv("WEBHOOK_URL")      # https://<your-app>.onrender.com/webhook
 PORT           = int(os.getenv("PORT", "8000"))
 
-# === СПИСОК РАЗРЕШЁННЫХ ===
+# === СПИСОК РАЗРЕШЁННЫХ ПОЛЬЗОВАТЕЛЕЙ ===
 ALLOWED_USERS = [
     "Николай Крылов",
     "Таждин Усейн",
@@ -168,7 +168,7 @@ async def score_handler(cb: types.CallbackQuery, state: FSMContext):
     )
     await send_criterion(cb.from_user.id, state)
 
-# === ОТРАВКА ВОПРОСА ===
+# === ОТПРАВКА ВОПРОСА ===
 async def send_criterion(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
@@ -208,7 +208,6 @@ async def generate_and_send(chat_id: int, data):
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    # Заголовок
     title = (
         f"Отчёт по проверке аптеки\n"
         f"Исполнитель: {name}\n"
@@ -219,13 +218,11 @@ async def generate_and_send(chat_id: int, data):
     ws["A1"].font = Font(size=14, bold=True)
     ws["B3"] = pharm
 
-    # Шапка
     headers = ["Блок","Критерий","Требование","Оценка участника","Макс. оценка","Примечание","Дата проверки"]
     for idx, h in enumerate(headers, start=1):
         cell = ws.cell(row=5, column=idx, value=h)
         cell.font = Font(bold=True)
 
-    # Данные
     row = 6
     total_score = 0
     total_max   = 0
@@ -250,19 +247,16 @@ async def generate_and_send(chat_id: int, data):
     fname = f"{pharm}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y')}.xlsx".replace(" ", "_")
     wb.save(fname)
 
-    # Отправка в общий чат
     with open(fname, "rb") as f:
         await bot.send_document(CHAT_ID, FSInputFile(f))
     os.remove(fname)
 
-    # Лог в CSV
     log_submission(pharm, name, ts, total_score, total_max)
 
 # === WEBHOOK И HEALTHCHECK ===
 async def handle_webhook(request: web.Request):
     data = await request.json()
     update = Update(**data)
-    # feed_update требует bot и именованный update
     await dp.feed_update(bot=bot, update=update)
     return web.Response(text="OK")
 
@@ -270,7 +264,11 @@ async def health(request: web.Request):
     return web.Response(text="OK")
 
 async def on_startup(app: web.Application):
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    await bot.set_webhook(
+        WEBHOOK_URL,
+        drop_pending_updates=True,
+        allowed_updates=["message", "callback_query"]
+    )
 
 async def on_cleanup(app: web.Application):
     await bot.delete_webhook()
