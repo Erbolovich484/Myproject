@@ -210,7 +210,7 @@ async def generate_and_send(chat_id: int, session_data):
 async def handle_webhook(request: web.Request):
     data = await request.json()
     update = Update(**data)
-    await dp.feed_update(update)
+    await dp.process_update(update)
     return web.Response(text="OK")
 
 # === Запуск AioHTTP-сервера и Webhook ===
