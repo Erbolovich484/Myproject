@@ -3,3 +3,5 @@ openpyxl
 pytz
 pandas
 python-dotenv
+aiogram[redis]
+redis
