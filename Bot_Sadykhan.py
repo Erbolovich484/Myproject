@@ -248,4 +248,10 @@ async def gen_report(uid: int, data):
 # === Старт polling ===
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    asyncio.run(dp.start_polling(bot))
+    async def main():
+        # Удаляем webhook, чтобы использовать polling
+        await bot.delete_webhook(drop_pending_updates=True)
+        # Запускаем polling
+        await dp.start_polling(bot, skip_updates=True)
+
+    asyncio.run(main())
