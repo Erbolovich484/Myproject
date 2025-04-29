@@ -159,14 +159,15 @@ async def send_question(chat_id: int, state: FSMContext):
     step = data["step"]
     crit = criteria[step]
     kb = InlineKeyboardBuilder()
-    start = 0 if crit["max")==1 else 1
-    for i in range(start, crit["max"]+1):
+    start = 0 if crit["max"] == 1 else 1
+    for i in range(start, crit["max"] + 1):
         kb.button(str(i), callback_data=f"score_{i}")
-    if step>0:
+    if step > 0:
         kb.button("◀️ Назад", callback_data="prev")
     kb.adjust(5)
 
-    await bot.send_message(chat_id,
+    await bot.send_message(
+        chat_id,
         f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
         f"<b>Блок:</b> {crit['block']}\n"
         f"<b>Критерий:</b> {crit['criterion']}\n"
@@ -191,38 +192,41 @@ async def make_report(user_chat: int, data: dict):
     ws["B3"] = pharm
 
     hdr = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки"]
-    for idx,h in enumerate(hdr,1):
+    for idx, h in enumerate(hdr, 1):
         ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
 
-    row=6; total=0; max_total=0
+    row = 6
+    total = 0
+    max_total = 0
     for it in answers:
-        c=it["crit"]; sc=it["score"]
-        ws.cell(row,1,c["block"])
-        ws.cell(row,2,c["criterion"])
-        ws.cell(row,3,c["requirement"])
-        ws.cell(row,4,sc)
-        ws.cell(row,5,c["max"])
-        ws.cell(row,7,ts)
-        total+=sc; max_total+=c["max"]
-        row+=1
+        c = it["crit"]
+        sc = it["score"]
+        ws.cell(row, 1, c["block"])
+        ws.cell(row, 2, c["criterion"])
+        ws.cell(row, 3, c["requirement"])
+        ws.cell(row, 4, sc)
+        ws.cell(row, 5, c["max"])
+        ws.cell(row, 7, ts)
+        total += sc
+        max_total += c["max"]
+        row += 1
 
-    ws.cell(row+1,3,"ИТОГО:");    ws.cell(row+1,4,total)
-    ws.cell(row+2,3,"Максимум:"); ws.cell(row+2,4,max_total)
-    ws.cell(row+4,1,"Вывод проверяющего:"); ws.cell(row+4,2,comment)
+    ws.cell(row+1, 3, "ИТОГО:");    ws.cell(row+1, 4, total)
+    ws.cell(row+2, 3, "Максимум:"); ws.cell(row+2, 4, max_total)
+    ws.cell(row+4, 1, "Вывод проверяющего:"); ws.cell(row+4, 2, comment)
 
-    fn = f"{pharm}_{name}_{now_str()}.xlsx".replace(" ","_")
+    fn = f"{pharm}_{name}_{now_str()}.xlsx".replace(" ", "_")
     wb.save(fn)
 
     for chat in (user_chat, QA_CHAT_ID):
-        with open(fn,"rb") as f:
+        with open(fn, "rb") as f:
             await bot.send_document(chat, types.InputFile(f, filename=fn))
     os.remove(fn)
 
     log_csv(pharm, name, ts, total, max_total)
 
-# === Webhook handlers ===
+# === Webhook setup ===
 async def on_startup(app: web.Application):
-    # удаляем старые вебхуки и ставим новый
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook установлен: {WEBHOOK_URL}")
