@@ -256,7 +256,7 @@ async def on_shutdown(app: web.Application) -> None:
 
 async def handle_update(request: web.Request) -> web.Response:
     data = await request.json()
-    update = types.Update.to_object(data)
+    update = types.Update(**data)
     await dp.process_update(update)
     return web.Response(status=200)
 
