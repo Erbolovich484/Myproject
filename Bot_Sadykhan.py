@@ -114,7 +114,7 @@ async def cmd_reset(msg: types.Message, state: FSMContext) -> None:
     await msg.answer("Состояние сброшено. /start — начать заново.")
 
 # === Обработка шагов FSM ===
-@dp.message(state=Form.name)
+@dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(
         name=msg.text.strip(), step=0,
@@ -124,7 +124,7 @@ async def proc_name(msg: types.Message, state: FSMContext) -> None:
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
-@dp.message(state=Form.pharmacy)
+@dp.message(Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
@@ -164,7 +164,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext) -> None:
 
         return await send_question(cb.from_user.id, state)
 
-@dp.message(state=Form.comment)
+@dp.message(Form.comment)
 async def proc_comment(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(comment=msg.text.strip())
     await msg.answer("Формирую отчёт…")
