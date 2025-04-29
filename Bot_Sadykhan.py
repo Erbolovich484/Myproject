@@ -3,6 +3,7 @@ import csv
 import pytz
 import asyncio
 import logging
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -20,7 +21,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# === SENIOR NOTE: Загружаем .env и проверяем ключевые переменные ===
+# === SENIOR NOTE: Загружаем .env и валидируем env vars ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
 QA_CHAT_ID     = int(os.getenv("QA_CHAT_ID", "0"))
@@ -35,7 +36,7 @@ LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
 WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
 WEBHOOK_URL  = f"https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}"
 
-# === Логирование ===
+# === Logging ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,7 @@ class Form(StatesGroup):
     rating   = State()
     comment  = State()
 
-# === SENIOR NOTE: Чтение чек-листа из Excel с fallback-логикой ===
+# === Load checklist ===
 try:
     _df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
 except Exception as e:
@@ -67,7 +68,7 @@ for _, r in _df.iterrows():
     criteria.append({"block": blk, "criterion": r["Критерий"], "requirement": r["Требование"], "max": maxv})
 TOTAL = len(criteria)
 
-# === Utility Functions ===
+# === Utils ===
 def now_str(fmt="%Y-%m-%d_%H-%M-%S"):
     tz = pytz.timezone("Asia/Almaty")
     return datetime.now(tz).strftime(fmt)
@@ -80,7 +81,7 @@ def log_csv(ph, nm, ts, sc, mx):
             w.writerow(["Дата","Аптека","Проверяющий","Баллы","Макс"])
         w.writerow([ts, ph, nm, sc, mx])
 
-# === Bot & Dispatcher Initialization ===
+# === Bot & Dispatcher ===
 bot = Bot(token=API_TOKEN)
 dp  = Dispatcher(storage=MemoryStorage())
 
@@ -114,7 +115,7 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново.")
 
-# === FSM Step Handlers ===
+# === FSM Steps ===
 @dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
     await state.update_data(name=msg.text.strip(), step=0, answers=[], start=now_str("%Y-%m-%d %H:%M:%S"))
@@ -134,14 +135,12 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
 
-    # Back
     if cb.data == "prev" and step > 0:
         data["step"] -= 1
         data["answers"].pop()
         await state.set_data(data)
         return await send_question(cb.from_user.id, state)
 
-    # Score
     if cb.data.startswith("score_"):
         score = int(cb.data.split("_")[1])
         crit  = criteria[step]
@@ -149,7 +148,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["step"] += 1
         await state.set_data(data)
 
-        # Try edit safely
         try:
             await bot.edit_message_text(
                 f"✅ Оценка: {score} {'⭐'*score}",
@@ -159,7 +157,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         except Exception as e:
             logger.warning(f"Edit message failed: {e}")
 
-        # Next or comment
         if data["step"] >= TOTAL:
             await bot.send_message(cb.from_user.id, "✅ Проверка завершена. Введите вывод проверяющего (или «—»):")
             return await state.set_state(Form.comment)
@@ -235,7 +232,6 @@ async def make_report(user_chat: int, data: dict):
     ws.cell(row+2, 3, "Максимум:"); ws.cell(row+2, 4, max_total)
     ws.cell(row+4, 1, "Вывод проверяющего:"); ws.cell(row+4, 2, comment)
 
-    # SENIOR NOTE: Используем временный файл?
     fn = f"{pharm}_{name}_{now_str()}.xlsx".replace(" ", "_")
     wb.save(fn)
 
@@ -248,11 +244,8 @@ async def make_report(user_chat: int, data: dict):
 
     log_csv(pharm, name, ts, total, max_total)
 
-# === Webhook Setup & App ===
+# === Webhook Setup & Application ===
 async def on_startup(app: web.Application):
-    if not PUBLIC_DOMAIN:
-        logger.error("RAILWAY_PUBLIC_DOMAIN is empty, cannot set webhook.")
-        return
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook установлен: {WEBHOOK_URL}")
@@ -261,12 +254,15 @@ async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
     logger.info("Webhook снят.")
 
-async def handle_update(request: web.Request):
+async def handle_update(request: web.Request) -> web.Response:
     raw = await request.text()
-    logger.info(f"Incoming raw update: {raw[:200]}")
-    data = await request.json()
-    update = types.Update(**data)  # SENIOR NOTE: v3 way
-    await dp.feed_update(update)
+    logger.info(f"Incoming raw update: {raw[:500]}")
+    try:
+        data = json.loads(raw)
+        update = types.Update(**data)
+        await dp.feed_update(update)
+    except Exception:
+        logger.exception("Error processing update")
     return web.Response(status=200)
 
 def build_app() -> web.Application:
