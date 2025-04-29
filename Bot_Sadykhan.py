@@ -10,7 +10,8 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font
 
-from aiogram import Bot, Dispatcher, F, types
+from aiohttp import web
+from aiogram import Bot, Dispatcher, types
 from aiogram.enums import ParseMode
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
@@ -20,10 +21,15 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # === Загрузка переменных окружения ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")                    # Токен бота
-QA_CHAT_ID     = int(os.getenv("QA_CHAT_ID", "0"))         # ID QA-чата
+QA_CHAT_ID     = int(os.getenv("QA_CHAT_ID", "0"))        # ID QA-чата
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "checklist.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
+
+# Извлечение публичного домена Railway
+PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")  # e.g. web-production-xxxx.up.railway.app
+WEBHOOK_PATH  = f"/webhook/{API_TOKEN}"
+WEBHOOK_URL   = f"https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}"
 
 # === Логирование ===
 logging.basicConfig(level=logging.INFO)
@@ -31,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 # === FSM-состояния ===
 class Form(StatesGroup):
-    name     = State()     # ввод ФИО
-    pharmacy = State()     # ввод аптеки
-    rating   = State()     # оценки по пунктам
-    comment  = State()     # свободный вывод
+    name     = State()
+    pharmacy = State()
+    rating   = State()
+    comment  = State()
 
 # === Подготовка критериев из Excel ===
 _df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
@@ -70,7 +76,7 @@ bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp  = Dispatcher(storage=MemoryStorage())
 
 # === Команды ===
-@dp.message(F.text == "/start")
+@dp.message_handler(commands=["start"])
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
@@ -81,37 +87,37 @@ async def cmd_start(msg: types.Message, state: FSMContext):
     )
     await state.set_state(Form.name)
 
-@dp.message(F.text == "/id")
+@dp.message_handler(commands=["id"])
 async def cmd_id(msg: types.Message):
     await msg.answer(f"Ваш chat_id = <code>{msg.chat.id}</code>")
 
-@dp.message(F.text == "/лог")
+@dp.message_handler(commands=["лог"])
 async def cmd_log(msg: types.Message):
     if os.path.exists(LOG_PATH):
         await msg.answer_document(types.InputFile(LOG_PATH))
     else:
         await msg.answer("Лог ещё не создан.")
 
-@dp.message(F.text == "/сброс")
+@dp.message_handler(commands=["сброс"])
 async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново.")
 
 # === Обработка шагов FSM ===
-@dp.message(Form.name)
+@dp.message_handler(state=Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
     await state.update_data(name=msg.text.strip(), step=0, answers=[], start=now_str("%Y-%m-%d %H:%M:%S"))
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
-@dp.message(Form.pharmacy)
+@dp.message_handler(state=Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
 
-@dp.callback_query()
+@dp.callback_query_handler()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
     data = await state.get_data()
@@ -139,7 +145,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
 
         return await send_question(cb.from_user.id, state)
 
-@dp.message(Form.comment)
+@dp.message_handler(state=Form.comment)
 async def proc_comment(msg: types.Message, state: FSMContext):
     await state.update_data(comment=msg.text.strip())
     await msg.answer("Формирую отчёт…")
@@ -153,7 +159,7 @@ async def send_question(chat_id: int, state: FSMContext):
     step = data["step"]
     crit = criteria[step]
     kb = InlineKeyboardBuilder()
-    start = 0 if crit["max"]==1 else 1
+    start = 0 if crit["max")==1 else 1
     for i in range(start, crit["max"]+1):
         kb.button(str(i), callback_data=f"score_{i}")
     if step>0:
@@ -214,12 +220,32 @@ async def make_report(user_chat: int, data: dict):
 
     log_csv(pharm, name, ts, total, max_total)
 
-# === Запуск long-polling ===
-async def main():
-    # удаляем любые вебхуки, чтобы не было конфликта
+# === Webhook handlers ===
+async def on_startup(app: web.Application):
+    # удаляем старые вебхуки и ставим новый
     await bot.delete_webhook(drop_pending_updates=True)
-    logger.info("Старт polling…")
-    await dp.start_polling(bot)
+    await bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook установлен: {WEBHOOK_URL}")
+
+async def on_shutdown(app: web.Application):
+    logger.info("Снимаем webhook…")
+    await bot.delete_webhook()
+
+async def handle_update(request: web.Request):
+    data = await request.json()
+    update = types.Update.to_object(data)
+    await dp.process_update(update)
+    return web.Response(status=200)
+
+# === Запуск приложения ===
+def build_app() -> web.Application:
+    app = web.Application()
+    app.router.add_post(WEBHOOK_PATH, handle_update)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    return app
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.getenv("PORT", 8080))
+    web_app = build_app()
+    web.run_app(web_app, host="0.0.0.0", port=port)
