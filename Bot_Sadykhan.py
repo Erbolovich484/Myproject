@@ -76,7 +76,7 @@ bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp  = Dispatcher(storage=MemoryStorage())
 
 # === Команды ===
-@dp.message_handler(commands=["start"])
+@dp.message.register(commands=["start"])
 async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
@@ -117,7 +117,7 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
 
-@dp.callback_query_handler()
+@dp.callback_query.register()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
     data = await state.get_data()
