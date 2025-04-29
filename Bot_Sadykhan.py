@@ -20,34 +20,41 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-# === Загрузка переменных окружения ===
+# === SENIOR NOTE: Загружаем .env и проверяем ключевые переменные ===
 load_dotenv()
-API_TOKEN      = os.getenv("API_TOKEN")                    # Токен бота
-QA_CHAT_ID     = int(os.getenv("QA_CHAT_ID", "0"))        # ID QA-чата
+API_TOKEN      = os.getenv("API_TOKEN")
+QA_CHAT_ID     = int(os.getenv("QA_CHAT_ID", "0"))
+PUBLIC_DOMAIN  = os.getenv("RAILWAY_PUBLIC_DOMAIN")  # e.g. web-production-xxxx.up.railway.app
+if not all([API_TOKEN, QA_CHAT_ID, PUBLIC_DOMAIN]):
+    raise RuntimeError("Missing required env vars: API_TOKEN, QA_CHAT_ID or RAILWAY_PUBLIC_DOMAIN")
+
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "checklist.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
 
-# Публичный домен Railway для webhook
-PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN")  # e.g. web-production-xxxx.up.railway.app
-WEBHOOK_PATH  = f"/webhook/{API_TOKEN}"
-WEBHOOK_URL   = f"https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}"
+WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
+WEBHOOK_URL  = f"https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}"
 
 # === Логирование ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# === FSM-состояния ===
+# === FSM States ===
 class Form(StatesGroup):
     name     = State()
     pharmacy = State()
     rating   = State()
     comment  = State()
 
-# === Загрузка критериев из Excel ===
-_df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
-start_i = _df[_df.iloc[:, 0] == "Блок"].index[0] + 1
-_df = _df.iloc[start_i:, :8].reset_index(drop=True)
+# === SENIOR NOTE: Чтение чек-листа из Excel с fallback-логикой ===
+try:
+    _df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
+except Exception as e:
+    logger.error(f"Failed to load checklist: {e}")
+    raise
+
+start_i = _df[_df.iloc[:,0] == "Блок"].index[0] + 1
+_df = _df.iloc[start_i:,:8].reset_index(drop=True)
 _df.columns = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки","Дата исправления"]
 _df = _df.dropna(subset=["Критерий","Требование"])
 
@@ -57,20 +64,15 @@ for _, r in _df.iterrows():
     blk = r["Блок"] if pd.notna(r["Блок"]) else last_block
     last_block = blk
     maxv = int(r["Макс"]) if pd.notna(r["Макс"]) and str(r["Макс"]).isdigit() else 10
-    criteria.append({
-        "block": blk,
-        "criterion": r["Критерий"],
-        "requirement": r["Требование"],
-        "max": maxv
-    })
+    criteria.append({"block": blk, "criterion": r["Критерий"], "requirement": r["Требование"], "max": maxv})
 TOTAL = len(criteria)
 
-# === Утилиты ===
-def now_str(fmt: str = "%Y-%m-%d_%H-%M-%S") -> str:
+# === Utility Functions ===
+def now_str(fmt="%Y-%m-%d_%H-%M-%S"):
     tz = pytz.timezone("Asia/Almaty")
     return datetime.now(tz).strftime(fmt)
 
-def log_csv(ph: str, nm: str, ts: str, sc: int, mx: int) -> None:
+def log_csv(ph, nm, ts, sc, mx):
     exists = os.path.exists(LOG_PATH)
     with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -78,15 +80,14 @@ def log_csv(ph: str, nm: str, ts: str, sc: int, mx: int) -> None:
             w.writerow(["Дата","Аптека","Проверяющий","Баллы","Макс"])
         w.writerow([ts, ph, nm, sc, mx])
 
-# === Инициализация Bot & Dispatcher ===
+# === Bot & Dispatcher Initialization ===
 bot = Bot(token=API_TOKEN)
-# parse_mode теперь задаётся в методах send
+dp  = Dispatcher(storage=MemoryStorage())
 
-dp = Dispatcher(storage=MemoryStorage())
-
-# === Команды ===
+# === Command Handlers ===
 @dp.message(Command("start"))
-async def cmd_start(msg: types.Message, state: FSMContext) -> None:
+async def cmd_start(msg: types.Message, state: FSMContext):
+    logger.info("cmd_start triggered")
     await state.clear()
     await msg.answer(
         "📋 <b>Чек-лист посещения аптек</b>\n\n"
@@ -98,85 +99,87 @@ async def cmd_start(msg: types.Message, state: FSMContext) -> None:
     await state.set_state(Form.name)
 
 @dp.message(Command("id"))
-async def cmd_id(msg: types.Message) -> None:
+async def cmd_id(msg: types.Message):
     await msg.answer(f"Ваш chat_id = <code>{msg.chat.id}</code>", parse_mode=ParseMode.HTML)
 
 @dp.message(Command("лог"))
-async def cmd_log(msg: types.Message) -> None:
+async def cmd_log(msg: types.Message):
     if os.path.exists(LOG_PATH):
         await msg.answer_document(InputFile(LOG_PATH))
     else:
         await msg.answer("Лог ещё не создан.")
 
 @dp.message(Command("сброс"))
-async def cmd_reset(msg: types.Message, state: FSMContext) -> None:
+async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново.")
 
-# === Обработка шагов FSM ===
+# === FSM Step Handlers ===
 @dp.message(Form.name)
-async def proc_name(msg: types.Message, state: FSMContext) -> None:
-    await state.update_data(
-        name=msg.text.strip(), step=0,
-        answers=[],
-        start=now_str("%Y-%m-%d %H:%M:%S")
-    )
+async def proc_name(msg: types.Message, state: FSMContext):
+    await state.update_data(name=msg.text.strip(), step=0, answers=[], start=now_str("%Y-%m-%d %H:%M:%S"))
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
 @dp.message(Form.pharmacy)
-async def proc_pharmacy(msg: types.Message, state: FSMContext) -> None:
+async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
 
 @dp.callback_query()
-async def cb_all(cb: types.CallbackQuery, state: FSMContext) -> None:
+async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
     data = await state.get_data()
     step = data["step"]
 
+    # Back
     if cb.data == "prev" and step > 0:
         data["step"] -= 1
         data["answers"].pop()
         await state.set_data(data)
         return await send_question(cb.from_user.id, state)
 
+    # Score
     if cb.data.startswith("score_"):
         score = int(cb.data.split("_")[1])
-        crit = criteria[step]
+        crit  = criteria[step]
         data["answers"].append({"crit": crit, "score": score})
         data["step"] += 1
         await state.set_data(data)
-        await bot.edit_message_text(
-            f"✅ Оценка: {score} {'⭐'*score}",
-            cb.message.chat.id,
-            cb.message.message_id
-        )
 
-        if data["step"] >= TOTAL:
-            await bot.send_message(
-                cb.from_user.id,
-                "✅ Проверка завершена. Введите вывод проверяющего (или «—»):"
+        # Try edit safely
+        try:
+            await bot.edit_message_text(
+                f"✅ Оценка: {score} {'⭐'*score}",
+                cb.message.chat.id,
+                cb.message.message_id
             )
+        except Exception as e:
+            logger.warning(f"Edit message failed: {e}")
+
+        # Next or comment
+        if data["step"] >= TOTAL:
+            await bot.send_message(cb.from_user.id, "✅ Проверка завершена. Введите вывод проверяющего (или «—»):")
             return await state.set_state(Form.comment)
 
         return await send_question(cb.from_user.id, state)
 
 @dp.message(Form.comment)
-async def proc_comment(msg: types.Message, state: FSMContext) -> None:
+async def proc_comment(msg: types.Message, state: FSMContext):
     await state.update_data(comment=msg.text.strip())
     await msg.answer("Формирую отчёт…")
     data = await state.get_data()
     await make_report(msg.chat.id, data)
     await state.clear()
 
-# === Функция отправки вопроса ===
-async def send_question(chat_id: int, state: FSMContext) -> None:
+# === Question Sender ===
+async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
     crit = criteria[step]
+
     kb = InlineKeyboardBuilder()
     start = 0 if crit["max"] == 1 else 1
     for i in range(start, crit["max"] + 1):
@@ -187,27 +190,26 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
 
     await bot.send_message(
         chat_id,
-        (
-            f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
-            f"<b>Блок:</b> {crit['block']}\n"
-            f"<b>Критерий:</b> {crit['criterion']}\n"
-            f"<b>Требование:</b> {crit['requirement']}\n"
-            f"<b>Макс. балл:</b> {crit['max']}"
-        ),
+        (f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
+         f"<b>Блок:</b> {crit['block']}\n"
+         f"<b>Критерий:</b> {crit['criterion']}\n"
+         f"<b>Требование:</b> {crit['requirement']}\n"
+         f"<b>Макс. балл:</b> {crit['max']}"),
         reply_markup=kb.as_markup(),
         parse_mode=ParseMode.HTML
     )
 
-# === Генерация и отправка отчёта ===
-async def make_report(user_chat: int, data: dict) -> None:
-    name = data["name"]
-    pharm = data["pharmacy"]
-    ts = data["start"]
+# === Report Generator ===
+async def make_report(user_chat: int, data: dict):
+    name    = data["name"]
+    pharm   = data["pharmacy"]
+    ts      = data["start"]
     comment = data["comment"]
     answers = data["answers"]
 
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
+
     title = f"Отчёт: {pharm} — {name} ({ts.split()[0]})"
     ws.merge_cells("A1:G2")
     ws["A1"] = title; ws["A1"].font = Font(size=14, bold=True)
@@ -215,8 +217,7 @@ async def make_report(user_chat: int, data: dict) -> None:
 
     hdr = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки"]
     for idx, h in enumerate(hdr, 1):
-        cell = ws.cell(row=5, column=idx, value=h)
-        cell.font = Font(bold=True)
+        ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
 
     row = 6; total = 0; max_total = 0
     for it in answers:
@@ -230,37 +231,44 @@ async def make_report(user_chat: int, data: dict) -> None:
         total += sc; max_total += c["max"]
         row += 1
 
-    ws.cell(row+1, 3, "ИТОГО:"); ws.cell(row+1, 4, total)
+    ws.cell(row+1, 3, "ИТОГО:");    ws.cell(row+1, 4, total)
     ws.cell(row+2, 3, "Максимум:"); ws.cell(row+2, 4, max_total)
     ws.cell(row+4, 1, "Вывод проверяющего:"); ws.cell(row+4, 2, comment)
 
+    # SENIOR NOTE: Используем временный файл?
     fn = f"{pharm}_{name}_{now_str()}.xlsx".replace(" ", "_")
     wb.save(fn)
 
-    # Отправка файла пользователю и в QA-чат
     for chat in (user_chat, QA_CHAT_ID):
-        await bot.send_document(chat, InputFile(fn))
+        try:
+            await bot.send_document(chat, InputFile(fn))
+        except Exception as e:
+            logger.error(f"Failed to send report to {chat}: {e}")
     os.remove(fn)
 
     log_csv(pharm, name, ts, total, max_total)
 
-# === Webhook setup ===
-async def on_startup(app: web.Application) -> None:
+# === Webhook Setup & App ===
+async def on_startup(app: web.Application):
+    if not PUBLIC_DOMAIN:
+        logger.error("RAILWAY_PUBLIC_DOMAIN is empty, cannot set webhook.")
+        return
     await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_webhook(WEBHOOK_URL)
     logger.info(f"Webhook установлен: {WEBHOOK_URL}")
 
-async def on_shutdown(app: web.Application) -> None:
-    logger.info("Снимаем webhook…")
+async def on_shutdown(app: web.Application):
     await bot.delete_webhook()
+    logger.info("Webhook снят.")
 
-async def handle_update(request: web.Request) -> web.Response:
+async def handle_update(request: web.Request):
+    raw = await request.text()
+    logger.info(f"Incoming raw update: {raw[:200]}")
     data = await request.json()
-    update = types.Update(**data)
-    await dp.process_update(update)
+    update = types.Update(**data)  # SENIOR NOTE: v3 way
+    await dp.feed_update(update)
     return web.Response(status=200)
 
-# === Запуск приложения ===
 def build_app() -> web.Application:
     app = web.Application()
     app.router.add_post(WEBHOOK_PATH, handle_update)
