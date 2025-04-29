@@ -85,7 +85,7 @@ bot = Bot(token=API_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
 # === Команды ===
-@dp.message.register(Command("start"))
+@dp.message(Command("start"))
 async def cmd_start(msg: types.Message, state: FSMContext) -> None:
     await state.clear()
     await msg.answer(
@@ -97,24 +97,24 @@ async def cmd_start(msg: types.Message, state: FSMContext) -> None:
     )
     await state.set_state(Form.name)
 
-@dp.message.register(Command("id"))
+@dp.message(Command("id"))
 async def cmd_id(msg: types.Message) -> None:
     await msg.answer(f"Ваш chat_id = <code>{msg.chat.id}</code>", parse_mode=ParseMode.HTML)
 
-@dp.message.register(Command("лог"))
+@dp.message(Command("лог"))
 async def cmd_log(msg: types.Message) -> None:
     if os.path.exists(LOG_PATH):
         await msg.answer_document(InputFile(LOG_PATH))
     else:
         await msg.answer("Лог ещё не создан.")
 
-@dp.message.register(Command("сброс"))
+@dp.message(Command("сброс"))
 async def cmd_reset(msg: types.Message, state: FSMContext) -> None:
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново.")
 
 # === Обработка шагов FSM ===
-@dp.message.register(state=Form.name)
+@dp.message(state=Form.name)
 async def proc_name(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(
         name=msg.text.strip(), step=0,
@@ -124,14 +124,14 @@ async def proc_name(msg: types.Message, state: FSMContext) -> None:
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
-@dp.message.register(state=Form.pharmacy)
+@dp.message(state=Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
 
-@dp.callback_query.register(lambda c: True)
+@dp.callback_query()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     data = await state.get_data()
@@ -164,7 +164,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext) -> None:
 
         return await send_question(cb.from_user.id, state)
 
-@dp.message.register(state=Form.comment)
+@dp.message(state=Form.comment)
 async def proc_comment(msg: types.Message, state: FSMContext) -> None:
     await state.update_data(comment=msg.text.strip())
     await msg.answer("Формирую отчёт…")
