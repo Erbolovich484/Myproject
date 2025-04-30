@@ -206,7 +206,7 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
         kb.adjust(5)
 
         async with semaphore:
-            await             text = (
+            text = (
                 f"<b>Вопрос {step+1} из {TOTAL}</b>
 
 "
@@ -225,9 +225,8 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
                 parse_mode=ParseMode.HTML
             )
             await asyncio.sleep(0.1)
-(0.1)
     except Exception as e:
-        logger.exception("Error in send_question")
+        logger.exception("Error in send_question: %s", e)
 
 # === Report Generator ===
 async def make_report(user_chat: int, data: dict) -> None:
