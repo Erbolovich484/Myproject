@@ -66,7 +66,7 @@ except Exception as e:
 start_idx = df[df.iloc[:,0] == "Блок"].index[0] + 1
 df = df.iloc[start_idx:,:8].reset_index(drop=True)
 df.columns = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки","Дата исправления"]
-df = df.dropna(subset=["Критерий","Требование"]).
+df = df.dropna(subset=["Критерий","Требование"])
 
 criteria = []
 last_block = None
