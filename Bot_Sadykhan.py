@@ -267,7 +267,7 @@ async def make_report(user_chat: int, data: dict) -> None:
                 await bot.send_document(chat, input_file)
         except Exception as e:
             logger.error("Failed to send report to %s: %s", chat, e)
-    os.remove(tmp_path)(tmp_path)
+    os.remove(tmp_path)
     log_csv(data['pharmacy'], data['name'], data['start'], total, max_total)
 
 # === Webhook Setup ===
