@@ -188,32 +188,44 @@ async def proc_comment(msg: types.Message, state: FSMContext) -> None:
 
 # === Question Sender ===
 async def send_question(chat_id: int, state: FSMContext) -> None:
-    data = await state.get_data()
-    step = data["step"]
-    crit = criteria[step]
+    """
+    Отправляет следующий вопрос пользователю. Добавлено логирование для отладки.
+    """
+    try:
+        data = await state.get_data()
+        step = data.get("step")
+        crit = criteria[step]
+        logger.info(f"send_question: step={step}, criterion={crit['criterion']}")
 
-    kb = InlineKeyboardBuilder()
-    start = 0 if crit["max"] == 1 else 1
-    for i in range(start, crit["max"] + 1):
-        kb.button(str(i), callback_data=f"score_{i}")
-    if step > 0:
-        kb.button("◀️ Назад", callback_data="prev")
-    kb.adjust(5)
+        kb = InlineKeyboardBuilder()
+        start = 0 if crit["max"] == 1 else 1
+        for i in range(start, crit["max"] + 1):
+            kb.button(str(i), callback_data=f"score_{i}")
+        if step > 0:
+            kb.button("◀️ Назад", callback_data="prev")
+        kb.adjust(5)
 
-    async with semaphore:
-        await bot.send_message(
-            chat_id,
-            (
-                f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
-                f"<b>Блок:</b> {crit['block']}\n"
-                f"<b>Критерий:</b> {crit['criterion']}\n"
-                f"<b>Требование:</b> {crit['requirement']}\n"
-                f"<b>Макс. балл:</b> {crit['max']}"
-            ),
-            reply_markup=kb.as_markup(),
-            parse_mode=ParseMode.HTML
-        )
-        await asyncio.sleep(0.1)
+        async with semaphore:
+            await bot.send_message(
+                chat_id,
+                (
+                    f"<b>Вопрос {step+1} из {TOTAL}</b>
+
+"
+                    f"<b>Блок:</b> {crit['block']}
+"
+                    f"<b>Критерий:</b> {crit['criterion']}
+"
+                    f"<b>Требование:</b> {crit['requirement']}
+"
+                    f"<b>Макс. балл:</b> {crit['max']}"
+                ),
+                reply_markup=kb.as_markup(),
+                parse_mode=ParseMode.HTML
+            )
+            await asyncio.sleep(0.1)
+    except Exception as e:
+        logger.exception("Error in send_question")
 
 # === Report Generator ===
 async def make_report(user_chat: int, data: dict) -> None:
