@@ -261,13 +261,13 @@ async def make_report(user_chat: int, data: dict) -> None:
 
     for chat in (user_chat, QA_CHAT_ID):
         try:
-            # Use file handle to send document
+            # Send as InputFile with filename
             with open(tmp_path, 'rb') as f:
-                await bot.send_document(chat, f, filename=os.path.basename(tmp_path))
+                input_file = InputFile(f, filename=os.path.basename(tmp_path))
+                await bot.send_document(chat, input_file)
         except Exception as e:
             logger.error("Failed to send report to %s: %s", chat, e)
-    
-    os.remove(tmp_path)
+    os.remove(tmp_path)(tmp_path)
     log_csv(data['pharmacy'], data['name'], data['start'], total, max_total)
 
 # === Webhook Setup ===
