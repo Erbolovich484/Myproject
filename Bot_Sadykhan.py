@@ -261,12 +261,11 @@ async def make_report(user_chat: int, data: dict) -> None:
 
     for chat in (user_chat, QA_CHAT_ID):
         try:
-            # Send as InputFile with filename
-            with open(tmp_path, 'rb') as f:
-                input_file = InputFile(f, filename=os.path.basename(tmp_path))
-                await bot.send_document(chat, input_file)
+            # Directly send the file path to avoid InputFile errors
+            await bot.send_document(chat, tmp_path)
         except Exception as e:
             logger.error("Failed to send report to %s: %s", chat, e)
+    # Remove temporary file
     os.remove(tmp_path)
     log_csv(data['pharmacy'], data['name'], data['start'], total, max_total)
 
