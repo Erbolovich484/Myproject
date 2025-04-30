@@ -188,12 +188,9 @@ async def proc_comment(msg: types.Message, state: FSMContext) -> None:
 
 # === Question Sender ===
 async def send_question(chat_id: int, state: FSMContext) -> None:
-    """
-    Отправляет следующий вопрос пользователю. Добавлено логирование для отладки.
-    """
     try:
         data = await state.get_data()
-        step = data.get("step")
+        step = data["step"]
         crit = criteria[step]
         logger.info(f"send_question: step={step}, criterion={crit['criterion']}")
 
@@ -207,15 +204,10 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
 
         async with semaphore:
             text = (
-                f"<b>Вопрос {step+1} из {TOTAL}</b>
-
-"
-                f"<b>Блок:</b> {crit['block']}
-"
-                f"<b>Критерий:</b> {crit['criterion']}
-"
-                f"<b>Требование:</b> {crit['requirement']}
-"
+                f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
+                f"<b>Блок:</b> {crit['block']}\n"
+                f"<b>Критерий:</b> {crit['criterion']}\n"
+                f"<b>Требование:</b> {crit['requirement']}\n"
                 f"<b>Макс. балл:</b> {crit['max']}"
             )
             await bot.send_message(
@@ -267,7 +259,6 @@ async def make_report(user_chat: int, data: dict) -> None:
         wb.save(tmp.name)
         tmp_path = tmp.name
 
-    # Send to user and QA chat
     for chat in (user_chat, QA_CHAT_ID):
         try:
             await bot.send_document(chat, InputFile(tmp_path))
