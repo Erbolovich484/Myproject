@@ -197,9 +197,9 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
         kb = InlineKeyboardBuilder()
         start = 0 if crit["max"] == 1 else 1
         for i in range(start, crit["max"] + 1):
-            kb.button(str(i), callback_data=f"score_{i}")
+            kb.button(text=str(i), callback_data=f"score_{i}")
         if step > 0:
-            kb.button("◀️ Назад", callback_data="prev")
+            kb.button(text="◀️ Назад", callback_data="prev")
         kb.adjust(5)
 
         async with semaphore:
