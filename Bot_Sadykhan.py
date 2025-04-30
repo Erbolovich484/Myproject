@@ -206,24 +206,26 @@ async def send_question(chat_id: int, state: FSMContext) -> None:
         kb.adjust(5)
 
         async with semaphore:
-            await bot.send_message(
-                chat_id,
-                (
-                    f"<b>Вопрос {step+1} из {TOTAL}</b>
+            await             text = (
+                f"<b>Вопрос {step+1} из {TOTAL}</b>
 
 "
-                    f"<b>Блок:</b> {crit['block']}
+                f"<b>Блок:</b> {crit['block']}
 "
-                    f"<b>Критерий:</b> {crit['criterion']}
+                f"<b>Критерий:</b> {crit['criterion']}
 "
-                    f"<b>Требование:</b> {crit['requirement']}
+                f"<b>Требование:</b> {crit['requirement']}
 "
-                    f"<b>Макс. балл:</b> {crit['max']}"
-                ),
+                f"<b>Макс. балл:</b> {crit['max']}"
+            )
+            await bot.send_message(
+                chat_id,
+                text,
                 reply_markup=kb.as_markup(),
                 parse_mode=ParseMode.HTML
             )
             await asyncio.sleep(0.1)
+(0.1)
     except Exception as e:
         logger.exception("Error in send_question")
 
