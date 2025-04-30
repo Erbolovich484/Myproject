@@ -261,8 +261,8 @@ async def make_report(user_chat: int, data: dict) -> None:
 
     for chat in (user_chat, QA_CHAT_ID):
         try:
-            # Directly send the file path to avoid InputFile errors
-            await bot.send_document(chat, tmp_path)
+            with open(tmp_path, 'rb') as f:
+                await bot.send_document(chat, InputFile(f, filename=os.path.basename(tmp_path)))
         except Exception as e:
             logger.error("Failed to send report to %s: %s", chat, e)
     # Remove temporary file
