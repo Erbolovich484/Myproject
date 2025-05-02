@@ -319,7 +319,6 @@ async def handle_webhook(request: web.Request):
     try:
         update = Update(**await request.json())
         logging.info(f"Parsed update: {update}")
-              await dp.feed_update(bot, update)
         return web.Response(text="OK")
     except Exception as e:
         logging.error(f"Error processing webhook: {e}", exc_info=True)
