@@ -18,6 +18,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, Update
 from aiohttp import web
 
+# === Настройка логирования ===
+logging.basicConfig(level=logging.INFO)
+
 # === Загрузка конфигов ===
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
@@ -78,13 +81,13 @@ def log_csv(pharm, name, ts, score, total):
         logging.error(f"Ошибка при записи в лог-файл {LOG_PATH}: {e}")
 
 # === Инициализация бота ===
-logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp = Dispatcher(storage=MemoryStorage())
 
 # === Команда /start ===
 @dp.message(F.text=="/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
+    logging.info(f"Handler 'cmd_start' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     await state.clear()
     await msg.answer(
         "<b>📋 Чек‑лист посещения аптек</b>\n\n"
@@ -96,37 +99,46 @@ async def cmd_start(msg: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
     await state.set_state(Form.name)
+    logging.info(f"User {msg.from_user.id} set state to Form.name")
 
 # === /id для отладки ===
 @dp.message(F.text=="/id")
 async def cmd_id(msg: types.Message):
+    logging.info(f"Handler 'cmd_id' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     await msg.answer(f"<code>{msg.chat.id}</code>")
 
 # === Сброс FSM ===
 @dp.message(F.text=="/сброс")
 async def cmd_reset(msg: types.Message, state: FSMContext):
+    logging.info(f"Handler 'cmd_reset' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново")
+    logging.info(f"User {msg.from_user.id} state cleared")
 
 # === Обработка ФИО ===
 @dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
+    logging.info(f"Handler 'proc_name' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     name = msg.text.strip()
     await state.update_data(name=name, step=0, data=[], start=now_ts())
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
+    logging.info(f"User {msg.from_user.id} entered name: {name}, set state to Form.pharmacy, state data: {await state.get_data()}")
 
 # === Обработка названия аптеки ===
 @dp.message(Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
+    logging.info(f"Handler 'proc_pharmacy' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
+    logging.info(f"User {msg.from_user.id} entered pharmacy: {await state.get_data()}, set state to Form.rating")
 
 # === Общий хэндлер callback_query ===
 @dp.callback_query()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
+    logging.info(f"Callback query received from user {cb.from_user.id}, chat {cb.message.chat.id}, data: {cb.data}")
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
@@ -160,6 +172,7 @@ async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
     total = len(criteria)
+    logging.info(f"Sending question {step + 1}/{total} to chat {chat_id}, state data: {data}")
 
     # если всё — переходим к комментарию
     if step >= total:
@@ -170,6 +183,7 @@ async def send_question(chat_id: int, state: FSMContext):
             parse_mode=ParseMode.HTML
         )
         await state.set_state(Form.comment)
+        logging.info(f"User {chat_id} finished rating, set state to Form.comment")
         return
 
     c = criteria[step]
@@ -193,15 +207,18 @@ async def send_question(chat_id: int, state: FSMContext):
 # === Обработка текстового комментария ===
 @dp.message(Form.comment)
 async def proc_comment(msg: types.Message, state: FSMContext):
+    logging.info(f"Handler 'proc_comment' called by user {msg.from_user.id}, chat {msg.chat.id}, text: {msg.text}")
     data = await state.get_data()
     data["comment"] = msg.text.strip()
     await state.update_data(**data)
     await msg.answer("⌛ Формирую отчёт…")
     await make_report(msg.chat.id, data)
     await state.clear()
+    logging.info(f"User {msg.from_user.id} entered comment, report initiated, state cleared")
 
 # === Генерация и отправка отчёта ===
 async def make_report(user_id: int, data):
+    logging.info(f"Generating report for user {user_id}, data: {data}")
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
@@ -256,11 +273,13 @@ async def make_report(user_id: int, data):
 
         # Сохраняем файл
         wb.save(report_filename)
+        logging.info(f"Report '{report_filename}' generated")
 
         # Отправляем пользователю
         try:
             with open(report_filename, "rb") as f:
                 await bot.send_document(user_id, FSInputFile(f, report_filename))
+            logging.info(f"Report '{report_filename}' sent to user {user_id}")
         except Exception as e:
             logging.error(f"Ошибка при отправке отчёта пользователю {user_id}: {e}", exc_info=True)
 
@@ -268,6 +287,7 @@ async def make_report(user_id: int, data):
         try:
             with open(report_filename, "rb") as f:
                 await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
+            logging.info(f"Report '{report_filename}' sent to chat {CHAT_ID}")
         except Exception as e:
             logging.error(f"Ошибка при отправке отчёта в чат {CHAT_ID}: {e}", exc_info=True)
 
@@ -289,6 +309,7 @@ async def make_report(user_id: int, data):
         # Обязательно удаляем временный файл после отправки
         try:
             os.remove(report_filename)
+            logging.info(f"Temporary report file '{report_filename}' deleted")
         except Exception as e:
             logging.warning(f"Не удалось удалить временный файл {report_filename}: {e}")
 
@@ -304,29 +325,4 @@ async def handle_webhook(request: web.Request):
         logging.error(f"Error processing webhook: {e}", exc_info=True)
         return web.Response(status=500)
 
-async def on_startup(app: web.Application):
-    await bot.set_webhook(WEBHOOK_URL)
-    logging.info(f"Webhook set to: {WEBHOOK_URL}")
-
-async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    logging.info("Webhook deleted.")
-
-async def main():
-    app = web.Application()
-    app.add_routes([web.post("/webhook", handle_webhook)])
-    app.router.add_get("/", lambda r: web.Response(text="OK"))
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    logging.info(f"Web application started on port {PORT}")
-    # Keep the application running indefinitely
-    while True:
-        await asyncio.sleep(3600)
-
-if __name__ == "__main__":
-    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-    asyncio.run(main())
+async def on_startup
