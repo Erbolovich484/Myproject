@@ -317,6 +317,4 @@ async def make_report(user_id: int, data):
 async def handle_webhook(request: web.Request):
     logging.info(f"Received webhook request: {request.method} {request.url}")
     try:
-        update = Update(**await request.json())
-        logging.info(f"Parsed update: {update}")
-        await
+        update = Update(**await request
