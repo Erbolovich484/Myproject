@@ -1,293 +1,277 @@
-import os
-import csv
-import pytz
-import asyncio
-import logging
-import json
-import tempfile
+import logging, os, csv, pytz
 from datetime import datetime
 from dotenv import load_dotenv
-
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font
 
-from aiohttp import web
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InputFile
+from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import FSInputFile, Update
+from aiohttp import web
 
-# === Load environment variables ===
+# === Загрузка конфигов ===
 load_dotenv()
 API_TOKEN      = os.getenv("API_TOKEN")
-QA_CHAT_ID     = os.getenv("QA_CHAT_ID")
-PUBLIC_DOMAIN  = os.getenv("RAILWAY_PUBLIC_DOMAIN")
+CHAT_ID        = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH  = os.getenv("TEMPLATE_PATH", "template.xlsx")
-CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "checklist.xlsx")
+CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH       = os.getenv("LOG_PATH", "checklist_log.csv")
+PORT           = int(os.getenv("PORT", 8000))
 
-# Validate required env vars
-missing = []
-for var in ("API_TOKEN","QA_CHAT_ID","PUBLIC_DOMAIN"):
-    if not locals().get(var):
-        missing.append(var)
-if missing:
-    raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
-
-API_TOKEN  = API_TOKEN.strip()
-QA_CHAT_ID = int(QA_CHAT_ID)
-
-WEBHOOK_PATH = f"/webhook/{API_TOKEN}"
-WEBHOOK_URL  = f"https://{PUBLIC_DOMAIN}{WEBHOOK_PATH}"
-
-# === Logging ===
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# === FSM States ===
+# === FSM-состояния ===
 class Form(StatesGroup):
-    name     = State()
-    pharmacy = State()
-    rating   = State()
-    comment  = State()
+    name    = State()
+    pharmacy= State()
+    rating  = State()
+    comment = State()
 
-# === Load checklist ===
-try:
-    df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
-except Exception as e:
-    logger.error(f"Failed to load checklist: {e}")
-    raise
-
-start_idx = df[df.iloc[:,0] == "Блок"].index[0] + 1
-df = df.iloc[start_idx:,:8].reset_index(drop=True)
+# === Читаем критерии из Excel ===
+df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
+start_i = df[df.iloc[:,0]=="Блок"].index[0]+1
+df = df.iloc[start_i:,:8].dropna(subset=[1,2]).reset_index(drop=True)
 df.columns = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки","Дата исправления"]
-df = df.dropna(subset=["Критерий","Требование"])
 
 criteria = []
-last_block = None
-for _, row in df.iterrows():
-    block   = row["Блок"] if pd.notna(row["Блок"]) else last_block
-    last_block = block
-    max_val = int(row["Макс"]) if pd.notna(row["Макс"]) and str(row["Макс"]).isdigit() else 10
+last = None
+for _,r in df.iterrows():
+    blk = r["Блок"] if pd.notna(r["Блок"]) else last
+    last = blk
+    maxv = int(r["Макс"]) if str(r["Макс"]).isdigit() else 10
     criteria.append({
-        "block": block,
-        "criterion": row["Критерий"],
-        "requirement": row["Требование"],
-        "max": max_val
+        "block": blk,
+        "criterion": r["Критерий"],
+        "requirement": r["Требование"],
+        "max": maxv
     })
-TOTAL = len(criteria)
 
-# === Utilities ===
-def now_str(fmt: str = "%Y-%m-%d_%H-%M-%S") -> str:
-    tz = pytz.timezone("Asia/Almaty")
-    return datetime.now(tz).strftime(fmt)
+# === Утилиты ===
+def now_ts():
+    return datetime.now(pytz.timezone("Asia/Almaty")).strftime("%Y-%m-%d %H:%M:%S")
 
-def log_csv(pharmacy: str, name: str, timestamp: str, score: int, max_score: int) -> None:
-    exists = os.path.exists(LOG_PATH)
-    with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        if not exists:
-            writer.writerow(["Дата","Аптека","Проверяющий","Баллы","Макс"])
-        writer.writerow([timestamp, pharmacy, name, score, max_score])
+def log_csv(pharm,name,ts,score,total):
+    first = not os.path.exists(LOG_PATH)
+    with open(LOG_PATH,"a",newline="",encoding="utf-8") as f:
+        w = csv.writer(f)
+        if first:
+            w.writerow(["Дата","Аптека","Проверяющий","Баллы","Макс"])
+        w.writerow([ts,pharm,name,score,total])
 
-# === Bot & Dispatcher ===
-bot = Bot(token=API_TOKEN)
+# === Инициализация бота ===
+logging.basicConfig(level=logging.INFO)
+bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
 dp  = Dispatcher(storage=MemoryStorage())
-semaphore = asyncio.Semaphore(1)
 
-# === Command Handlers ===
-@dp.message(Command("start"))
-async def cmd_start(msg: types.Message, state: FSMContext) -> None:
-    logger.info("/start from %s", msg.from_user.id)
+# === Команда /start ===
+@dp.message(F.text=="/start")
+async def cmd_start(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
-        "📋 <b>Чек-лист посещения аптек</b>\n\n"
-        "Интеллектуальная собственность ИТ-Садыхан.\n"
-        "Заполняйте вдумчиво — отчёт придёт и вам, и в QA-чат.\n\n"
-        "🏁 Введите ваше ФИО:",
+        "<b>📋 Чек‑лист посещения аптек</b>\n\n"
+        "Этот бот — интеллектуальная собственность ИТ «Садыхан».  \n"
+        "Заполняйте чек‑лист вдумчиво и внимательно:  \n"
+        "- inline‑кнопки для быстрой оценки;  \n"
+        "- если оценка займёт больше минуты — после всех баллов вы сможете написать вывод ручкой.\n\n"
+        "Введите ваше ФИО для авторизации:",
         parse_mode=ParseMode.HTML
     )
     await state.set_state(Form.name)
 
-@dp.message(Command("id"))
-async def cmd_id(msg: types.Message) -> None:
-    await msg.answer(f"Ваш chat_id = <code>{msg.chat.id}</code>", parse_mode=ParseMode.HTML)
+# === /id для отладки ===
+@dp.message(F.text=="/id")
+async def cmd_id(msg: types.Message):
+    await msg.answer(f"<code>{msg.chat.id}</code>")
 
-@dp.message(Command("лог"))
-async def cmd_log(msg: types.Message) -> None:
-    if os.path.exists(LOG_PATH):
-        await msg.answer_document(InputFile(LOG_PATH, filename=os.path.basename(LOG_PATH)))
-    else:
-        await msg.answer("Лог ещё не создан.")
-
-@dp.message(Command("сброс"))
-async def cmd_reset(msg: types.Message, state: FSMContext) -> None:
+# === Сброс FSM ===
+@dp.message(F.text=="/сброс")
+async def cmd_reset(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("Состояние сброшено. /start — начать заново.")
+    await msg.answer("Состояние сброшено. /start — начать заново")
 
-# === FSM Step Handlers ===
+# === Обработка ФИО ===
 @dp.message(Form.name)
-async def proc_name(msg: types.Message, state: FSMContext) -> None:
-    await state.update_data(name=msg.text.strip(), step=0, answers=[], start=now_str())
+async def proc_name(msg: types.Message, state: FSMContext):
+    name = msg.text.strip()
+    await state.update_data(name=name, step=0, data=[], start=now_ts())
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
+# === Обработка названия аптеки ===
 @dp.message(Form.pharmacy)
-async def proc_pharmacy(msg: types.Message, state: FSMContext) -> None:
+async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     await send_question(msg.chat.id, state)
 
+# === Общий хэндлер callback_query ===
 @dp.callback_query()
-async def cb_all(cb: types.CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+async def cb_all(cb: types.CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    step = data.get("step",0)
+    total= len(criteria)
+    # если уже все оценили — просто acknowledge
+    if step>=total:
+        return await cb.answer()
+    # парсим оценку
+    if cb.data.startswith("score_"):
+        score = int(cb.data.split("_",1)[1])
+        record = {"crit": criteria[step], "score": score}
+        data["data"].append(record)
+        data["step"] += 1
+        await state.update_data(**data)
+        # редактируем исходное сообщение
+        await bot.edit_message_text(
+            f"✅ Оценка: {score} {'⭐'*score}",
+            chat_id=cb.message.chat.id,
+            message_id=cb.message.message_id
+        )
+        # отправляем следующий
+        return await send_question(cb.from_user.id, state)
+    # навигация «Назад»
+    if cb.data=="prev" and step>0:
+        data["step"]-=1
+        data["data"].pop()
+        await state.update_data(**data)
+        return await send_question(cb.from_user.id, state)
+
+# === Функция отправки следующего вопроса или финального промпта ===
+async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data["step"]
+    total= len(criteria)
 
-    # Назад
-    if cb.data == "prev" and step > 0:
-        data["step"] -= 1
-        data["answers"].pop()
-        await state.set_data(data)
-        return await send_question(cb.from_user.id, state)
+    # если всё — переходим к комментарию
+    if step>=total:
+        await bot.send_message(
+            chat_id,
+            "✅ Все оценки поставлены!\n\n"
+            "📝 Теперь напишите, пожалуйста, ваши выводы по аптеке:",
+            parse_mode=ParseMode.HTML
+        )
+        await state.set_state(Form.comment)
+        return
 
-    # Оценка
-    if cb.data.startswith("score_"):
-        score = int(cb.data.split("_")[1])
-        crit  = criteria[step]
-        data["answers"].append({"crit": crit, "score": score})
-        data["step"] += 1
-        await state.set_data(data)
+    c = criteria[step]
+    text = (
+        f"<b>Вопрос {step+1} из {total}</b>\n\n"
+        f"<b>Блок:</b> {c['block']}\n"
+        f"<b>Критерий:</b> {c['criterion']}\n"
+        f"<b>Требование:</b> {c['requirement']}\n"
+        f"<b>Макс. балл:</b> {c['max']}"
+    )
+    kb = InlineKeyboardBuilder()
+    start = 0 if c["max"]==1 else 1
+    for i in range(start, c["max"]+1):
+        kb.button(text=str(i), callback_data=f"score_{i}")
+    if step>0:
+        kb.button(text="◀️ Назад", callback_data="prev")
+    kb.adjust(5)
 
-        # Редактирование сообщения
-        try:
-            await bot.edit_message_text(
-                f"✅ Оценка: {score} {'⭐'*score}",
-                cb.message.chat.id,
-                cb.message.message_id
-            )
-        except:
-            pass
+    await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
 
-        # Если все вопросы — переходим к комментарию
-        if data["step"] >= TOTAL:
-            await bot.send_message(cb.from_user.id,
-                "✅ Проверка завершена. Введите вывод проверяющего (или «—»):"
-            )
-            return await state.set_state(Form.comment)
-
-        return await send_question(cb.from_user.id, state)
-
+# === Обработка текстового комментария ===
 @dp.message(Form.comment)
-async def proc_comment(msg: types.Message, state: FSMContext) -> None:
-    await state.update_data(comment=msg.text.strip())
-    await msg.answer("Формирую отчёт…")
+async def proc_comment(msg: types.Message, state: FSMContext):
     data = await state.get_data()
+    data["comment"] = msg.text.strip()
+    await state.update_data(**data)
+    await msg.answer("⌛ Формирую отчёт…")
     await make_report(msg.chat.id, data)
     await state.clear()
 
-async def send_question(chat_id: int, state: FSMContext) -> None:
-    try:
-        data = await state.get_data()
-        step = data["step"]
-        crit = criteria[step]
-        logger.info("send_question: step=%s, crit=%s", step, crit["criterion"])
-
-        kb = InlineKeyboardBuilder()
-        start = 0 if crit["max"] == 1 else 1
-        for i in range(start, crit["max"] + 1):
-            kb.button(text=str(i), callback_data=f"score_{i}")
-        if step > 0:
-            kb.button(text="◀️ Назад", callback_data="prev")
-        kb.adjust(5)
-
-        async with semaphore:
-            text = (
-                f"<b>Вопрос {step+1} из {TOTAL}</b>\n\n"
-                f"<b>Блок:</b> {crit['block']}\n"
-                f"<b>Критерий:</b> {crit['criterion']}\n"
-                f"<b>Требование:</b> {crit['requirement']}\n"
-                f"<b>Макс. балл:</b> {crit['max']}"
-            )
-            await bot.send_message(
-                chat_id,
-                text,
-                reply_markup=kb.as_markup(),
-                parse_mode=ParseMode.HTML
-            )
-            await asyncio.sleep(0.1)
-    except Exception as e:
-        logger.exception("Error in send_question: %s", e)
-
-async def make_report(user_chat: int, data: dict) -> None:
+# === Генерация и отправка отчёта ===
+async def make_report(chat_id: int, data):
+    name     = data["name"]
+    ts       = data["start"]
+    pharmacy = data["pharmacy"]
     wb = load_workbook(TEMPLATE_PATH)
     ws = wb.active
 
-    title = f"Отчёт: {data['pharmacy']} — {data['name']} ({data['start'].split()[0]})"
-    ws.merge_cells("A1:G2"); ws["A1"] = title; ws["A1"].font = Font(size=14, bold=True)
-    ws["B3"] = data["pharmacy"]
+    # Заголовок
+    title = (f"Отчёт по проверке аптеки\n"
+             f"Исполнитель: {name}\n"
+             f"Дата и время: {ts}")
+    ws.merge_cells("A1:G2")
+    ws["A1"] = title
+    ws["A1"].font = Font(size=14, bold=True)
+    ws["B3"] = pharmacy
 
-    hdr = ["Блок","Критерий","Требование","Оценка","Макс","Примечание","Дата проверки"]
-    for idx, h in enumerate(hdr, 1):
-        ws.cell(row=5, column=idx, value=h).font = Font(bold=True)
+    # Шапка таблицы
+    headers = ["Блок","Критерий","Требование","Оценка","Макс","Коммент.","Дата проверки"]
+    for idx,h in enumerate(headers, start=1):
+        cell = ws.cell(5, idx, h)
+        cell.font = Font(bold=True)
 
+    # Заполняем строки
     row = 6
-    total = 0
-    max_total = 0
-    for it in data["answers"]:
-        c, sc = it["crit"], it["score"]
-        ws.cell(row,1,c["block"])
-        ws.cell(row,2,c["criterion"])
-        ws.cell(row,3,c["requirement"])
-        ws.cell(row,4,sc)
-        ws.cell(row,5,c["max"])
-        ws.cell(row,7,data["start"])
-        total += sc
-        max_total += c["max"]
+    total_score = 0
+    total_max   = 0
+    for rec in data["data"]:
+        c = rec["crit"]
+        sc= rec["score"]
+        ws.cell(row,1, c["block"])
+        ws.cell(row,2, c["criterion"])
+        ws.cell(row,3, c["requirement"])
+        ws.cell(row,4, sc)
+        ws.cell(row,5, c["max"])
+        ws.cell(row,6, "")  # можно сюда вставить индивидуальный прим.
+        ws.cell(row,7, ts)
+        total_score += sc
+        total_max   += c["max"]
         row += 1
 
-    ws.cell(row+1,3,"ИТОГО:");    ws.cell(row+1,4,total)
-    ws.cell(row+2,3,"Максимум:"); ws.cell(row+2,4,max_total)
-    ws.cell(row+4,1,"Вывод проверяющего:"); ws.cell(row+4,2,data["comment"])
+    # Итого
+    ws.cell(row+1,3, "ИТОГО:")
+    ws.cell(row+1,4, total_score)
+    ws.cell(row+2,3, "Максимум:")
+    ws.cell(row+2,4, total_max)
 
-    # Save to temporary file
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as tmp:
-        wb.save(tmp.name)
-        tmp_path = tmp.name
+    # Ваш комментарий внизу
+    ws.cell(row+4,1, "Вывод проверяющего:")
+    ws.cell(row+5,1, data.get("comment",""))
 
-    # Send report
-    for chat_id in (user_chat, QA_CHAT_ID):
-        try:
-            input_file = InputFile(path=tmp_path, filename=os.path.basename(tmp_path))
-            await bot.send_document(chat_id, input_file)
-        except Exception as e:
-            logger.error("Failed to send report to %s: %s", chat_id, e)
+    # Сохраняем файл
+    fn = f"{pharmacy}_{name}_{datetime.strptime(ts,'%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y_%H%M')}.xlsx"
+    fn = fn.replace(" ","_")
+    wb.save(fn)
 
-    # Cleanup
-    os.remove(tmp_path)
+    # 1) Отправляем пользователю
+    with open(fn,"rb") as f:
+        await bot.send_document(chat_id, FSInputFile(f, fn))
+    # 2) И в QA‑чат
+    with open(fn,"rb") as f:
+        await bot.send_document(CHAT_ID, FSInputFile(f, fn))
 
-# === Webhook setup ===
-async def handle_update(request: web.Request) -> web.Response:
-    raw = await request.text()
-    logger.info("Incoming raw update: %s", raw[:200])
-    try:
-        data = json.loads(raw)
-        update = types.Update(**data)
-        await dp.feed_update(bot, update)
-    except Exception:
-        logger.exception("Error processing update")
-    return web.Response(status=200)
+    # Логируем
+    log_csv(pharmacy, name, ts, total_score, total_max)
+
+    # Финальное сообщение
+    await bot.send_message(chat_id,
+        "✅ Отчёт сформирован и отправлен.\n"
+        "Для новой проверки — /start"
+    )
+    os.remove(fn)
+
+# === Webhook & запуск ===
+async def handle_webhook(request: web.Request):
+    update = Update(**await request.json())
+    await dp.feed_update(bot, update)
+    return web.Response(text="OK")
+
+async def on_startup(app: web.Application):
+    # если нужен Webhook:
+    # await bot.set_webhook(os.getenv("WEBHOOK_URL"))
+    pass
 
 app = web.Application()
-app.router.add_post(WEBHOOK_PATH, handle_update)
-app.on_startup.append(lambda a: asyncio.create_task(bot.set_webhook(WEBHOOK_URL)))
-app.on_shutdown.append(lambda a: asyncio.create_task(bot.delete_webhook()))
+app.router.add_post("/webhook", handle_webhook)
+app.router.add_get("/", lambda r: web.Response(text="OK"))
 
-if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)))
+if __name__=="__main__":
+    logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
+    web.run_app(app, host="0.0.0.0", port=PORT)
