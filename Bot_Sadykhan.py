@@ -26,7 +26,7 @@ load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH = os.getenv("TEMPLATE_PATH", "template.xlsx")
-CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
+CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "checklist.xlsx")  # Исправлено имя файла по умолчанию
 LOG_PATH = os.getenv("LOG_PATH", "checklist_log.csv")
 PORT = int(os.getenv("PORT", 8080))  # Убедитесь, что этот порт соответствует настройкам Railway
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -225,9 +225,9 @@ async def make_report(user_id: int, data):
     report_filename = f"{pharmacy}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y_%H%M')}.xlsx".replace(" ", "_")
 
     try:
+        logging.info(f"Attempting to load template: {TEMPLATE_PATH}")
         wb = load_workbook(TEMPLATE_PATH)
         ws = wb.active
-
         # Заголовок
         title = (f"Отчёт по проверке аптеки\n"
                  f"Исполнитель: {name}\n"
@@ -271,25 +271,35 @@ async def make_report(user_id: int, data):
         ws.cell(row + 4, 1, "Вывод проверяющего:")
         ws.cell(row + 5, 1, data.get("comment", ""))
 
-        # Сохраняем файл
-        wb.save(report_filename)
-        logging.info(f"Report '{report_filename}' generated")
-
-        # Отправляем пользователю
         try:
+            logging.info(f"Attempting to save report: {report_filename}")
+            wb.save(report_filename)
+            logging.info(f"Report '{report_filename}' saved")
+        except Exception as e:
+            logging.error(f"Error saving report: {e}", exc_info=True)
+            await bot.send_message(user_id, "❌ Ошибка при сохранении отчёта.")
+            return
+
+        try:
+            logging.info(f"Attempting to open report for sending: {report_filename}")
             with open(report_filename, "rb") as f:
+                logging.info(f"Report opened successfully, attempting to send to user {user_id}")
                 await bot.send_document(user_id, FSInputFile(f, report_filename))
-            logging.info(f"Report '{report_filename}' sent to user {user_id}")
+                logging.info(f"Report sent to user {user_id}")
         except Exception as e:
-            logging.error(f"Ошибка при отправке отчёта пользователю {user_id}: {e}", exc_info=True)
+            logging.error(f"Error sending report to user {user_id}: {e}", exc_info=True)
+            await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
+            return
 
-        # И в QA‑чат
         try:
+            logging.info(f"Attempting to open report for sending to chat {CHAT_ID}: {report_filename}")
             with open(report_filename, "rb") as f:
+                logging.info(f"Report opened successfully, attempting to send to chat {CHAT_ID}")
                 await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
-            logging.info(f"Report '{report_filename}' sent to chat {CHAT_ID}")
+                logging.info(f"Report sent to chat {CHAT_ID}")
         except Exception as e:
-            logging.error(f"Ошибка при отправке отчёта в чат {CHAT_ID}: {e}", exc_info=True)
+            logging.error(f"Error sending report to chat {CHAT_ID}: {e}", exc_info=True)
+            # Не возвращаем здесь, так как отправка в чат не критична для пользователя
 
         # Логируем
         log_csv(pharmacy, name, ts, total_score, total_max)
@@ -306,8 +316,8 @@ async def make_report(user_id: int, data):
         logging.error(f"Ошибка при создании отчёта: {e}", exc_info=True)
         await bot.send_message(user_id, "❌ Произошла ошибка при формировании отчёта.")
     finally:
-        # Обязательно удаляем временный файл после отправки
         try:
+            logging.info(f"Attempting to remove temporary file: {report_filename}")
             os.remove(report_filename)
             logging.info(f"Temporary report file '{report_filename}' deleted")
         except Exception as e:
@@ -319,6 +329,7 @@ async def handle_webhook(request: web.Request):
     try:
         update = Update(**await request.json())
         logging.info(f"Parsed update: {update}")
+        await dp.feed_update(bot, update)
         return web.Response(text="OK")
     except Exception as e:
         logging.error(f"Error processing webhook: {e}", exc_info=True)
