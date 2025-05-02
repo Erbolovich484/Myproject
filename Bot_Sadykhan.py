@@ -317,4 +317,45 @@ async def make_report(user_id: int, data):
 async def handle_webhook(request: web.Request):
     logging.info(f"Received webhook request: {request.method} {request.url}")
     try:
-        update = Update(**await request
+        update = Update(**await request.json())
+        logging.info(f"Parsed update: {update}")
+              await dp.feed_update(bot, update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logging.error(f"Error processing webhook: {e}", exc_info=True)
+        return web.Response(status=500)
+
+async def on_startup(bot: Bot):
+    if WEBHOOK_URL:
+        webhook_url = f"{WEBHOOK_URL}/webhook"
+        await bot.set_webhook(webhook_url)
+        logging.info(f"Webhook set to: {webhook_url}")
+    else:
+        logging.warning("WEBHOOK_URL не определен. Бот будет работать в режиме Long Polling.")
+
+async def on_shutdown(bot: Bot):
+    logging.warning("Shutting down...")
+    await bot.delete_webhook()
+    await bot.session.close()
+    logging.warning("Bot and session closed.")
+
+async def main():
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
+
+    if WEBHOOK_URL:
+        app = web.Application()
+        app.add_routes([web.post("/webhook", handle_webhook)])
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "0.0.0.0", PORT)
+        await site.start()
+        logging.info(f"Web application started on port {PORT}")
+        # Keep the server running
+        while True:
+            await asyncio.sleep(3600)
+    else:
+        await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
