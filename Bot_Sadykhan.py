@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font
-import asyncio  # Добавлен asyncio
+import asyncio
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
@@ -26,6 +26,7 @@ TEMPLATE_PATH = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH = os.getenv("LOG_PATH", "checklist_log.csv")
 PORT = int(os.getenv("PORT", 8000))
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Убедитесь, что эта переменная окружения настроена в Railway
 
 # === FSM-состояния ===
 class Form(StatesGroup):
@@ -298,17 +299,28 @@ async def handle_webhook(request: web.Request):
     return web.Response(text="OK")
 
 async def on_startup(app: web.Application):
-    # если нужен Webhook:
-    # await bot.set_webhook(os.getenv("WEBHOOK_URL"))
-    pass
+    await bot.set_webhook(WEBHOOK_URL)
+    logging.info(f"Webhook set to: {WEBHOOK_URL}")
+
+async def on_shutdown(app: web.Application):
+    await bot.delete_webhook()
+    logging.info("Webhook deleted.")
 
 async def main():
     app = web.Application()
-    app.router.add_post("/webhook", handle_webhook)
+    app.add_routes([web.post("/webhook", handle_webhook)])
     app.router.add_get("/", lambda r: web.Response(text="OK"))
-    await dp.start_polling(bot)
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", PORT)
+    await site.start()
+    logging.info(f"Web application started on port {PORT}")
+    # Keep the application running indefinitely
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
     logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
     asyncio.run(main())
-    # web.run_app(app, host="0.0.0.0", port=PORT) # Запуск aiohttp больше не нужен при использовании start_polling
