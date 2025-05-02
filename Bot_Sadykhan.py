@@ -25,8 +25,8 @@ CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH = os.getenv("TEMPLATE_PATH", "template.xlsx")
 CHECKLIST_PATH = os.getenv("CHECKLIST_PATH", "Упрощенный чек-лист для проверки аптек.xlsx")
 LOG_PATH = os.getenv("LOG_PATH", "checklist_log.csv")
-PORT = int(os.getenv("PORT", 8000))
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Убедитесь, что эта переменная окружения настроена в Railway
+PORT = int(os.getenv("PORT", 8080))  # Убедитесь, что этот порт соответствует настройкам Railway
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 # === FSM-состояния ===
 class Form(StatesGroup):
@@ -262,14 +262,14 @@ async def make_report(user_id: int, data):
             with open(report_filename, "rb") as f:
                 await bot.send_document(user_id, FSInputFile(f, report_filename))
         except Exception as e:
-            logging.error(f"Ошибка при отправке отчёта пользователю {user_id}: {e}")
+            logging.error(f"Ошибка при отправке отчёта пользователю {user_id}: {e}", exc_info=True)
 
         # И в QA‑чат
         try:
             with open(report_filename, "rb") as f:
                 await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
         except Exception as e:
-            logging.error(f"Ошибка при отправке отчёта в чат {CHAT_ID}: {e}")
+            logging.error(f"Ошибка при отправке отчёта в чат {CHAT_ID}: {e}", exc_info=True)
 
         # Логируем
         log_csv(pharmacy, name, ts, total_score, total_max)
@@ -283,7 +283,7 @@ async def make_report(user_id: int, data):
         logging.error(f"Файл шаблона не найден: {TEMPLATE_PATH}")
         await bot.send_message(user_id, "❌ Ошибка: Файл шаблона отчёта не найден.")
     except Exception as e:
-        logging.error(f"Ошибка при создании отчёта: {e}")
+        logging.error(f"Ошибка при создании отчёта: {e}", exc_info=True)
         await bot.send_message(user_id, "❌ Произошла ошибка при формировании отчёта.")
     finally:
         # Обязательно удаляем временный файл после отправки
@@ -294,9 +294,15 @@ async def make_report(user_id: int, data):
 
 # === Webhook & запуск ===
 async def handle_webhook(request: web.Request):
-    update = Update(**await request.json())
-    await dp.feed_update(bot, update)
-    return web.Response(text="OK")
+    logging.info(f"Received webhook request: {request.method} {request.url}")
+    try:
+        update = Update(**await request.json())
+        logging.info(f"Parsed update: {update}")
+        await dp.feed_update(bot, update)
+        return web.Response(text="OK")
+    except Exception as e:
+        logging.error(f"Error processing webhook: {e}", exc_info=True)
+        return web.Response(status=500)
 
 async def on_startup(app: web.Application):
     await bot.set_webhook(WEBHOOK_URL)
