@@ -132,6 +132,7 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=msg.text.strip())
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
+    logging.info("Calling send_question from proc_pharmacy")
     await send_question(msg.chat.id, state)
     logging.info(f"User {msg.from_user.id} entered pharmacy: {await state.get_data()}, set state to Form.rating")
 
@@ -170,9 +171,9 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
 # === Функция отправки следующего вопроса или финального промпта ===
 async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
-    step = data["step"]
+    step = data.get("step", 0)
     total = len(criteria)
-    logging.info(f"Sending question {step + 1}/{total} to chat {chat_id}, state data: {data}")
+    logging.info(f"send_question called. step: {step}, total: {total}, criteria length: {len(criteria)}")
 
     # если всё — переходим к комментарию
     if step >= total:
