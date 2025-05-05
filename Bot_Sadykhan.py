@@ -17,7 +17,6 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, Update
 from aiohttp import web
-from aiogram.bot.api import TelegramAPIServer
 from aiogram.client.default import DefaultBotProperties
 
 # === Настройка логирования ===
