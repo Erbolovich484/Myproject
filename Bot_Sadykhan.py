@@ -318,7 +318,7 @@ async def make_report(user_id: int, data):
             await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
             return
 
-    try:
+try:
         if CHAT_ID:
             logging.info(f"Attempting to send report to chat {CHAT_ID}.")
             with open(report_filename, "rb") as f:
