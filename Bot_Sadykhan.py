@@ -17,6 +17,8 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import FSInputFile, Update
 from aiohttp import web
+from aiogram.bot.api import TelegramAPIServer
+from aiogram.client.default import DefaultBotProperties
 
 # === Настройка логирования ===
 logging.basicConfig(level=logging.DEBUG)  # Уровень DEBUG для более подробных логов
@@ -104,7 +106,7 @@ def log_csv(pharm, name, ts, score, total):
         logging.error(f"Error writing to log file: {LOG_PATH} - {e}", exc_info=True)
 
 # === Инициализация бота ===
-bot = Bot(token=API_TOKEN, parse_mode=ParseMode.HTML)
+bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
 
 # === Команда /start ===
@@ -160,7 +162,6 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await send_question(msg.chat.id, state)
 
 # === Общий хэндлер callback_query ===
-@dp.callback_query()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     logging.info(f"Callback query received from user {cb.from_user.id}, data: {cb.data}")
     data = await state.get_data()
@@ -196,6 +197,8 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     else:
         logging.warning(f"Unhandled callback data: {cb.data}")
         await cb.answer("Неизвестная команда")
+
+dp.callback_query.register(cb_all) # Явная регистрация обработчика
 
 # === Функция отправки следующего вопроса или финального промпта ===
 async def send_question(chat_id: int, state: FSMContext):
@@ -304,7 +307,7 @@ async def make_report(user_id: int, data):
             wb.save(report_filename)
             logging.info(f"Report saved successfully.")
         except Exception as e:
-            logging.error(f"Error saving report: {e}", exc_info=True)
+            logging.error(f"Error saving report: {e}", exc_info, exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при сохранении отчёта.")
             return
 
@@ -320,7 +323,7 @@ async def make_report(user_id: int, data):
 
         try:
             if CHAT_ID:
-                logging.info(f"Attempting to send report to chat{CHAT_ID}.")
+                logging.info(f"Attempting to send report to chat {CHAT_ID}.")
                 with open(report_filename, "rb") as f:
                     await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
                 logging.info(f"Report sent to chat {CHAT_ID}.")
