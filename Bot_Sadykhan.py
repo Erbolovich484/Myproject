@@ -139,6 +139,7 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
 # === Общий хэндлер callback_query ===
 @dp.callback_query()
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
+    logging.info(f"*** CALLBACK QUERY RECEIVED: {cb.data} ***")
     logging.info(f"Callback query received from user {cb.from_user.id}, chat {cb.message.chat.id}, data: {cb.data}")
     data = await state.get_data()
     step = data.get("step", 0)
