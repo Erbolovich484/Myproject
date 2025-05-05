@@ -318,13 +318,15 @@ async def make_report(user_id: int, data):
             await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
             return
 
- if CHAT_ID:
         try:
+        if CHAT_ID:
             logging.info(f"Attempting to send report to chat {CHAT_ID}.")
             with open(report_filename, "rb") as f:
                 await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
-        except Exception as e:
-            logging.error(f"Error sending report to chat {CHAT_ID}: {e}", exc_info=True)
+        else:
+            logging.warning("CHAT_ID is not set, skipping sending report to chat.")
+    except Exception as e:
+        logging.error(f"Error sending report to chat {CHAT_ID}: {e}", exc_info=True)
     else:
         logging.warning("CHAT_ID is not set, skipping sending report to chat.")
         
