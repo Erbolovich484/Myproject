@@ -135,15 +135,29 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
 async def proc_name(msg: types.Message, state: FSMContext):
     name = msg.text.strip()
     logger.info(f"User {msg.from_user.id} entered name: {name}")
-    # Инициализируем состояние с обязательным ключом 'data'
-    await state.update_data(name=name, step=0, data=[], start=now_ts())
+    # Инициализируем состояние
+    initial_data = {
+        "name": name,
+        "step": 0,
+        "data": [],
+        "start": now_ts()
+    }
+    await state.set_data(initial_data)
+    logger.debug(f"State set with: {initial_data}")
+    # Проверяем, что данные корректно установлены
     data = await state.get_data()
     logger.debug(f"State after proc_name: {data}")
-    if "data" not in data:
+    if "data" not in data or not isinstance(data["data"], list):
         logger.error("Failed to initialize 'data' key in state")
-        await msg.answer("❌ Ошибка: Не удалось инициализировать состояние. Начните заново с /start.")
-        await state.clear()
-        return
+        # Пробуем повторно установить данные
+        await state.set_data(initial_data)
+        data = await state.get_data()
+        logger.debug(f"State after retry: {data}")
+        if "data" not in data or not isinstance(data["data"], list):
+            logger.error("Retry failed: 'data' key still missing")
+            await msg.answer("❌ Ошибка: Не удалось инициализировать состояние. Начните заново с /start.")
+            await state.clear()
+            return
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
