@@ -213,9 +213,8 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
 
     data = await state.get_data()
-    logger.debug(f"FSM state data: {data}")  # Добавляем отладочный лог
+    logger.debug(f"FSM state data: {data}")
 
-    # Проверяем наличие необходимых ключей
     if not data or "step" not in data:
         logger.error("FSM state is empty or missing 'step' key")
         await bot.send_message(cb.message.chat.id, "❌ Ошибка: Состояние сброшено. Пожалуйста, начните заново с /start.")
@@ -235,7 +234,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
             score = int(cb.data.split("_")[1])
             criterion = criteria[step]
             if score <= criterion["max"]:
-                # Инициализируем 'data' как список, если он отсутствует
                 if "data" not in data:
                     logger.warning(f"'data' key missing in FSM state, initializing as empty list")
                     data["data"] = []
@@ -285,6 +283,7 @@ async def proc_comment(msg: types.Message, state: FSMContext):
 # === Генерация отчёта ===
 async def make_report(user_id: int, data):
     logger.info(f"Generating report for user {user_id}")
+    logger.debug(f"Report data: {data}")  # Добавляем отладочный лог
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
@@ -307,19 +306,23 @@ async def make_report(user_id: int, data):
         row = 6
         total_score = 0
         total_max = 0
-        for rec in data.get("data", []):
-            crit = rec["crit"]
-            score = rec["score"]
-            ws.cell(row, 1, crit["block"])
-            ws.cell(row, 2, crit["criterion"])
-            ws.cell(row, 3, crit["requirement"])
-            ws.cell(row, 4, score)
-            ws.cell(row, 5, crit["max"])
-            ws.cell(row, 6, "")
-            ws.cell(row, 7, ts)
-            total_score += score
-            total_max += crit["max"]
-            row += 1
+        if "data" in data and data["data"]:
+            for rec in data["data"]:
+                crit = rec["crit"]
+                score = rec["score"]
+                ws.cell(row, 1, crit["block"])
+                ws.cell(row, 2, crit["criterion"])
+                ws.cell(row, 3, crit["requirement"])
+                ws.cell(row, 4, score)
+                ws.cell(row, 5, crit["max"])
+                ws.cell(row, 6, "")
+                ws.cell(row, 7, ts)
+                total_score += score
+                total_max += crit["max"]
+                row += 1
+        else:
+            logger.warning("No data available for report, table will be empty")
+            await bot.send_message(user_id, "⚠️ Внимание: Отчёт пуст, так как оценки не были сохранены.")
 
         ws.cell(row + 1, 3, "ИТОГО:")
         ws.cell(row + 1, 4, total_score)
