@@ -25,15 +25,12 @@ from aiohttp import web
 logger = logging.getLogger("BotSadykhan")
 logger.setLevel(logging.DEBUG)
 
-# Форматтер для логов
 formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-# Консольный обработчик
 console_handler = logging.StreamHandler()
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-# Файловый обработчик с ротацией
 file_handler = RotatingFileHandler("app.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
 file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
@@ -70,22 +67,27 @@ try:
     logger.info(f"Reading checklist from: {CHECKLIST_PATH}")
     df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
     start_i = df[df.iloc[:, 0] == "Блок"].index[0] + 1
-    df = df.iloc[start_i:, :8].dropna(subset=[1, 2]).reset_index(drop=True)
+    df = df.iloc[start_i:, :8].reset_index(drop=True)
     df.columns = ["Блок", "Критерий", "Требование", "Оценка", "Макс", "Примечание", "Дата проверки", "Дата исправления"]
 
-    last_block = None
+    last_block = "Неизвестный блок"  # Значение по умолчанию
     for _, row in df.iterrows():
+        # Пропускаем строки, где "Критерий" или "Требование" пусты
+        if pd.isna(row["Критерий"]) or pd.isna(row["Требование"]):
+            continue
+
         block = row["Блок"] if pd.notna(row["Блок"]) else last_block
         last_block = block
         max_value = str(row["Макс"])
         max_score = int(max_value) if max_value.isdigit() else 10
         criteria.append({
             "block": block,
-            "criterion": row["Критерий"],
-            "requirement": row["Требование"],
+            "criterion": str(row["Критерий"]),
+            "requirement": str(row["Требование"]),
             "max": max_score
         })
     logger.info(f"Loaded {len(criteria)} criteria.")
+    logger.debug(f"Criteria content: {criteria}")
 except Exception as e:
     logger.error(f"Error reading checklist: {e}", exc_info=True)
 
@@ -145,6 +147,7 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     await state.update_data(pharmacy=pharmacy)
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
+    logger.debug(f"Calling send_question for chat {msg.chat.id}")
     await send_question(msg.chat.id, state)
 
 # === Отправка вопроса ===
@@ -153,6 +156,13 @@ async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
+    logger.debug(f"Step: {step}, Total: {total}")
+
+    if total == 0:
+        logger.error("Criteria list is empty")
+        await bot.send_message(chat_id, "❌ Ошибка: Не удалось загрузить критерии проверки.")
+        await state.clear()
+        return
 
     if step >= total:
         logger.info(f"All criteria processed for chat {chat_id}")
@@ -165,39 +175,44 @@ async def send_question(chat_id: int, state: FSMContext):
         await state.set_state(Form.comment)
         return
 
-    if not criteria:
-        logger.error("Criteria list is empty")
-        await bot.send_message(chat_id, "❌ Ошибка: Не удалось загрузить критерии проверки.")
-        await state.clear()
-        return
-
-    criterion = criteria[step]
-    text = (
-        f"<b>Вопрос {step + 1} из {total}</b>\n\n"
-        f"<b>Блок:</b> {criterion['block']}\n"
-        f"<b>Критерий:</b> {criterion['criterion']}\n"
-        f"<b>Требование:</b> {criterion['requirement']}\n"
-        f"<b>Макс. балл:</b> {criterion['max']}"
-    )
-    kb = InlineKeyboardBuilder()
-    start_score = 0 if criterion["max"] == 1 else 1
-    for i in range(start_score, criterion["max"] + 1):
-        kb.button(text=str(i), callback_data=f"score_{i}")
-    if step > 0:
-        kb.button(text="◀️ Назад", callback_data="prev")
-    kb.adjust(5)
-
     try:
+        criterion = criteria[step]
+        logger.debug(f"Criterion at step {step}: {criterion}")
+        # Проверяем, что все ключи присутствуют и не пусты
+        required_keys = ["block", "criterion", "requirement", "max"]
+        missing_keys = [key for key in required_keys if key not in criterion or criterion[key] is None or str(criterion[key]).strip() == ""]
+        if missing_keys:
+            logger.error(f"Missing or empty keys in criterion at step {step}: {missing_keys}")
+            await bot.send_message(chat_id, f"❌ Ошибка: Некорректные данные критерия на шаге {step + 1}.")
+            await state.clear()
+            return
+
+        text = (
+            f"<b>Вопрос {step + 1} из {total}</b>\n\n"
+            f"<b>Блок:</b> {criterion['block']}\n"
+            f"<b>Критерий:</b> {criterion['criterion']}\n"
+            f"<b>Требование:</b> {criterion['requirement']}\n"
+            f"<b>Макс. балл:</b> {criterion['max']}"
+        )
+        kb = InlineKeyboardBuilder()
+        start_score = 0 if criterion["max"] == 1 else 1
+        for i in range(start_score, criterion["max"] + 1):
+            kb.button(text=str(i), callback_data=f"score_{i}")
+        if step > 0:
+            kb.button(text="◀️ Назад", callback_data="prev")
+        kb.adjust(5)
+
         sent_message = await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
         logger.debug(f"Sent question {step + 1} to chat {chat_id}, message_id: {sent_message.message_id}")
     except Exception as e:
-        logger.error(f"Error sending question: {e}", exc_info=True)
-        await bot.send_message(chat_id, "❌ Ошибка при отправке вопроса.")
+        logger.error(f"Error in send_question for chat {chat_id}: {e}", exc_info=True)
+        await bot.send_message(chat_id, "❌ Ошибка при отправке вопроса. Пожалуйста, начните заново с /start.")
+        await state.clear()
 
 # === Обработка callback-запросов ===
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     logger.info(f"Callback from user {cb.from_user.id}: {cb.data}")
-    await cb.answer()  # Подтверждаем callback
+    await cb.answer()
 
     data = await state.get_data()
     step = data.get("step", 0)
@@ -302,7 +317,6 @@ async def make_report(user_id: int, data):
         wb.save(report_filename)
         logger.info(f"Report saved: {report_filename}")
 
-        # Отправка файла
         try:
             file = FSInputFile(report_filename, filename=report_filename)
             await bot.send_document(user_id, file)
