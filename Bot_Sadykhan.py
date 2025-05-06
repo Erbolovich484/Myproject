@@ -9,6 +9,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import Font
 import asyncio
 import json
+from logging.handlers import RotatingFileHandler
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
@@ -21,11 +22,21 @@ from aiogram.client.default import DefaultBotProperties
 from aiohttp import web
 
 # === Настройка логирования ===
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+logger = logging.getLogger("BotSadykhan")
+logger.setLevel(logging.DEBUG)
+
+# Форматтер для логов
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+
+# Консольный обработчик
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
+
+# Файловый обработчик с ротацией
+file_handler = RotatingFileHandler("app.log", maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+file_handler.setFormatter(formatter)
+logger.addHandler(file_handler)
 
 # === Загрузка конфигов ===
 load_dotenv()
@@ -37,14 +48,14 @@ LOG_PATH = os.getenv("LOG_PATH", "checklist_log.csv")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-logging.info("Bot configuration loaded.")
-logging.debug(f"API_TOKEN is set: {API_TOKEN is not None}")
-logging.debug(f"CHAT_ID: {CHAT_ID}")
-logging.debug(f"TEMPLATE_PATH: {TEMPLATE_PATH}")
-logging.debug(f"CHECKLIST_PATH: {CHECKLIST_PATH}")
-logging.debug(f"LOG_PATH: {LOG_PATH}")
-logging.debug(f"PORT: {PORT}")
-logging.debug(f"WEBHOOK_URL: {WEBHOOK_URL}")
+logger.info("Bot configuration loaded.")
+logger.debug("API_TOKEN is set: [REDACTED]")
+logger.debug(f"CHAT_ID: {CHAT_ID}")
+logger.debug(f"TEMPLATE_PATH: {TEMPLATE_PATH}")
+logger.debug(f"CHECKLIST_PATH: {CHECKLIST_PATH}")
+logger.debug(f"LOG_PATH: {LOG_PATH}")
+logger.debug(f"PORT: {PORT}")
+logger.debug(f"WEBHOOK_URL: {WEBHOOK_URL}")
 
 # === FSM-состояния ===
 class Form(StatesGroup):
@@ -56,7 +67,7 @@ class Form(StatesGroup):
 # === Читаем критерии из Excel ===
 criteria = []
 try:
-    logging.info(f"Reading checklist from: {CHECKLIST_PATH}")
+    logger.info(f"Reading checklist from: {CHECKLIST_PATH}")
     df = pd.read_excel(CHECKLIST_PATH, sheet_name="Чек лист", header=None)
     start_i = df[df.iloc[:, 0] == "Блок"].index[0] + 1
     df = df.iloc[start_i:, :8].dropna(subset=[1, 2]).reset_index(drop=True)
@@ -74,9 +85,9 @@ try:
             "requirement": row["Требование"],
             "max": max_score
         })
-    logging.info(f"Loaded {len(criteria)} criteria.")
+    logger.info(f"Loaded {len(criteria)} criteria.")
 except Exception as e:
-    logging.error(f"Error reading checklist: {e}", exc_info=True)
+    logger.error(f"Error reading checklist: {e}", exc_info=True)
 
 # === Утилиты ===
 def now_ts():
@@ -91,7 +102,7 @@ def log_csv(pharm, name, ts, score, total):
                 writer.writerow(["Дата", "Аптека", "Проверяющий", "Баллы", "Макс"])
             writer.writerow([ts, pharm, name, score, total])
     except Exception as e:
-        logging.error(f"Error writing to log: {e}", exc_info=True)
+        logger.error(f"Error writing to log: {e}", exc_info=True)
 
 # === Инициализация бота ===
 bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -99,7 +110,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # === Команда /start ===
 async def cmd_start(msg: types.Message, state: FSMContext):
-    logging.info(f"User {msg.from_user.id} called /start")
+    logger.info(f"User {msg.from_user.id} called /start")
     await state.clear()
     await msg.answer(
         "<b>📋 Чек‑лист посещения аптек</b>\n\n"
@@ -110,19 +121,19 @@ async def cmd_start(msg: types.Message, state: FSMContext):
 
 # === /id для отладки ===
 async def cmd_id(msg: types.Message):
-    logging.info(f"User {msg.from_user.id} called /id")
+    logger.info(f"User {msg.from_user.id} called /id")
     await msg.answer(f"<code>{msg.chat.id}</code>")
 
 # === Сброс FSM ===
 async def cmd_reset(msg: types.Message, state: FSMContext):
-    logging.info(f"User {msg.from_user.id} called /сброс")
+    logger.info(f"User {msg.from_user.id} called /сброс")
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново")
 
 # === Обработка ФИО ===
 async def proc_name(msg: types.Message, state: FSMContext):
     name = msg.text.strip()
-    logging.info(f"User {msg.from_user.id} entered name: {name}")
+    logger.info(f"User {msg.from_user.id} entered name: {name}")
     await state.update_data(name=name, step=0, data=[], start=now_ts())
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
@@ -130,7 +141,7 @@ async def proc_name(msg: types.Message, state: FSMContext):
 # === Обработка названия аптеки ===
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
     pharmacy = msg.text.strip()
-    logging.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
+    logger.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
     await state.update_data(pharmacy=pharmacy)
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
@@ -138,13 +149,13 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
 
 # === Отправка вопроса ===
 async def send_question(chat_id: int, state: FSMContext):
-    logging.info(f"Sending question to chat {chat_id}")
+    logger.info(f"Sending question to chat {chat_id}")
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
 
     if step >= total:
-        logging.info(f"All criteria processed for chat {chat_id}")
+        logger.info(f"All criteria processed for chat {chat_id}")
         await bot.send_message(
             chat_id,
             "✅ Все оценки поставлены!\n\n"
@@ -155,7 +166,7 @@ async def send_question(chat_id: int, state: FSMContext):
         return
 
     if not criteria:
-        logging.error("Criteria list is empty")
+        logger.error("Criteria list is empty")
         await bot.send_message(chat_id, "❌ Ошибка: Не удалось загрузить критерии проверки.")
         await state.clear()
         return
@@ -178,23 +189,23 @@ async def send_question(chat_id: int, state: FSMContext):
 
     try:
         sent_message = await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
-        logging.debug(f"Sent question {step + 1} to chat {chat_id}, message_id: {sent_message.message_id}")
+        logger.debug(f"Sent question {step + 1} to chat {chat_id}, message_id: {sent_message.message_id}")
     except Exception as e:
-        logging.error(f"Error sending question: {e}", exc_info=True)
+        logger.error(f"Error sending question: {e}", exc_info=True)
         await bot.send_message(chat_id, "❌ Ошибка при отправке вопроса.")
 
 # === Обработка callback-запросов ===
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
-    logging.info(f"Callback from user {cb.from_user.id}: {cb.data}")
+    logger.info(f"Callback from user {cb.from_user.id}: {cb.data}")
     await cb.answer()  # Подтверждаем callback
 
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
-    logging.debug(f"Step: {step}, Total: {total}, Data: {cb.data}")
+    logger.debug(f"Step: {step}, Total: {total}, Data: {cb.data}")
 
     if step >= total:
-        logging.debug("All criteria rated")
+        logger.debug("All criteria rated")
         return
 
     if cb.data.startswith("score_"):
@@ -205,7 +216,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
                 data["data"].append({"crit": criterion, "score": score})
                 data["step"] = step + 1
                 await state.update_data(**data)
-                logging.debug(f"Score {score} saved for step {step}")
+                logger.debug(f"Score {score} saved for step {step}")
                 try:
                     await bot.edit_message_text(
                         f"✅ Оценка: {score} {'⭐' * score}",
@@ -213,28 +224,28 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
                         message_id=cb.message.message_id
                     )
                 except Exception as e:
-                    logging.error(f"Error editing message: {e}", exc_info=True)
+                    logger.error(f"Error editing message: {e}", exc_info=True)
                 await send_question(cb.message.chat.id, state)
             else:
-                logging.warning(f"Invalid score {score} for max {criterion['max']}")
+                logger.warning(f"Invalid score {score} for max {criterion['max']}")
                 await bot.send_message(cb.message.chat.id, "❌ Неверная оценка, попробуйте снова.")
         except ValueError as e:
-            logging.error(f"Invalid callback data: {cb.data}, error: {e}")
+            logger.error(f"Invalid callback data: {cb.data}, error: {e}")
             await bot.send_message(cb.message.chat.id, "❌ Ошибка обработки оценки.")
     elif cb.data == "prev" and step > 0:
         data["step"] = step - 1
         data["data"].pop()
         await state.update_data(**data)
-        logging.debug(f"Navigated back to step {step - 1}")
+        logger.debug(f"Navigated back to step {step - 1}")
         await send_question(cb.message.chat.id, state)
     else:
-        logging.warning(f"Unhandled callback: {cb.data}")
+        logger.warning(f"Unhandled callback: {cb.data}")
         await bot.send_message(cb.message.chat.id, "❌ Неизвестная команда.")
 
 # === Обработка комментария ===
 async def proc_comment(msg: types.Message, state: FSMContext):
     comment = msg.text.strip()
-    logging.info(f"User {msg.from_user.id} entered comment: {comment}")
+    logger.info(f"User {msg.from_user.id} entered comment: {comment}")
     data = await state.get_data()
     data["comment"] = comment
     await state.update_data(**data)
@@ -244,7 +255,7 @@ async def proc_comment(msg: types.Message, state: FSMContext):
 
 # === Генерация отчёта ===
 async def make_report(user_id: int, data):
-    logging.info(f"Generating report for user {user_id}")
+    logger.info(f"Generating report for user {user_id}")
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
@@ -289,34 +300,43 @@ async def make_report(user_id: int, data):
         ws.cell(row + 5, 1, data.get("comment", ""))
 
         wb.save(report_filename)
-        logging.info(f"Report saved: {report_filename}")
+        logger.info(f"Report saved: {report_filename}")
 
-        with open(report_filename, "rb") as f:
-            await bot.send_document(user_id, FSInputFile(f, filename=report_filename))
+        # Отправка файла
+        try:
+            file = FSInputFile(report_filename, filename=report_filename)
+            await bot.send_document(user_id, file)
+            logger.info(f"Report sent to user {user_id}")
+        except Exception as e:
+            logger.error(f"Error sending report: {e}", exc_info=True)
+            await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
+            return
+
         log_csv(pharmacy, name, ts, total_score, total_max)
         await bot.send_message(user_id, "✅ Отчёт сформирован и отправлен.\n/start — новая проверка")
 
     except Exception as e:
-        logging.error(f"Error generating report: {e}", exc_info=True)
+        logger.error(f"Error generating report: {e}", exc_info=True)
         await bot.send_message(user_id, "❌ Ошибка при формировании отчёта.")
     finally:
         try:
-            os.remove(report_filename)
-            logging.info(f"Deleted report file: {report_filename}")
+            if os.path.exists(report_filename):
+                os.remove(report_filename)
+                logger.info(f"Deleted report file: {report_filename}")
         except Exception as e:
-            logging.warning(f"Failed to delete report file: {e}")
+            logger.warning(f"Failed to delete report file: {e}")
 
 # === Webhook ===
 async def handle_webhook(request: web.Request):
-    logging.info(f"Webhook received: {request.method} {request.url}")
+    logger.info(f"Webhook received: {request.method} {request.url}")
     try:
         update = await request.json()
-        logging.debug(f"Webhook data: {json.dumps(update, indent=2, ensure_ascii=False)}")
+        logger.debug(f"Webhook data: {json.dumps(update, indent=2, ensure_ascii=False)}")
         update = Update(**update)
         await dp.feed_update(bot, update)
         return web.Response(text="OK")
     except Exception as e:
-        logging.error(f"Webhook error: {e}", exc_info=True)
+        logger.error(f"Webhook error: {e}", exc_info=True)
         return web.Response(status=500)
 
 async def on_startup(bot: Bot):
@@ -325,14 +345,14 @@ async def on_startup(bot: Bot):
         webhook_url = f"{WEBHOOK_URL}{webhook_path}"
         try:
             await bot.set_webhook(webhook_url)
-            logging.info(f"Webhook set to: {webhook_url}")
+            logger.info(f"Webhook set to: {webhook_url}")
         except Exception as e:
-            logging.error(f"Error setting webhook: {e}", exc_info=True)
+            logger.error(f"Error setting webhook: {e}", exc_info=True)
     else:
-        logging.warning("WEBHOOK_URL not set, using long polling")
+        logger.warning("WEBHOOK_URL not set, using long polling")
 
 async def on_shutdown(bot: Bot):
-    logging.info("Shutting down bot")
+    logger.info("Shutting down bot")
     await bot.delete_webhook()
     await bot.session.close()
 
@@ -355,7 +375,7 @@ async def main():
         await runner.setup()
         site = web.TCPSite(runner, "0.0.0.0", PORT)
         await site.start()
-        logging.info(f"Webhook server started on port {PORT}")
+        logger.info(f"Webhook server started on port {PORT}")
         while True:
             await asyncio.sleep(3600)
     else:
