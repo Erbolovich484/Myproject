@@ -147,13 +147,16 @@ async def proc_name(msg: types.Message, state: FSMContext):
 
 # === Обработка названия аптеки ===
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
+    logging.info(f"proc_pharmacy started for user {msg.from_user.id}")
     pharmacy = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
     await state.update_data(pharmacy=pharmacy)
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     logging.debug(f"User {msg.from_user.id} entered state: Form.rating, data: {await state.get_data()}")
+    logging.info(f"Calling send_question from proc_pharmacy for user {msg.from_user.id}")
     await send_question(msg.chat.id, state)
+    logging.info(f"proc_pharmacy finished for user {msg.from_user.id}")
 
 # === Общий хэндлер callback_query ===
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
@@ -173,11 +176,14 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["data"].append(record)
         data["step"] += 1
         await state.update_data(**data)
-        await bot.edit_message_text(
-            f"✅ Оценка: {score} {'⭐' * score}",
-            chat_id=cb.message.chat.id,
-            message_id=cb.message.message_id
-        )
+        try:
+            await bot.edit_message_text(
+                f"✅ Оценка: {score} {'⭐' * score}",
+                chat_id=cb.message.chat.id,
+                message_id=cb.message.message_id
+            )
+        except Exception as e:
+            logging.error(f"Error editing message in cb_all: {e}", exc_info=True)
         await send_question(cb.from_user.id, state)
         return
     elif cb.data == "prev" and step > 0:
@@ -193,6 +199,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
 
 # === Функция отправки следующего вопроса или финального промпта ===
 async def send_question(chat_id: int, state: FSMContext):
+    logging.info(f"send_question started for chat {chat_id}")
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
@@ -211,24 +218,36 @@ async def send_question(chat_id: int, state: FSMContext):
         logging.debug(f"User {chat_id} entered state: Form.comment")
         return
 
-    c = criteria[step]
-    text = (
-        f"<b>Вопрос {step + 1} из {total}</b>\n\n"
-        f"<b>Блок:</b> {c['block']}\n"
-        f"<b>Критерий:</b> {c['criterion']}\n"
-        f"<b>Требование:</b> {c['requirement']}\n"
-        f"<b>Макс. балл:</b> {c['max']}"
-    )
-    kb = InlineKeyboardBuilder()
-    start = 0 if c["max"] == 1 else 1
-    for i in range(start, c["max"] + 1):
-        kb.button(text=str(i), callback_data=f"score_{i}")
-    if step > 0:
-        kb.button(text="◀️ Назад", callback_data="prev")
-    kb.adjust(5)
+    if not criteria:
+        logging.error("Criteria list is empty. Check checklist file.")
+        await bot.send_message(chat_id, "❌ Ошибка: Не удалось загрузить критерии проверки.")
+        await state.clear()
+        return
 
-    await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
-    logging.debug(f"Question sent to chat {chat_id} with keyboard: {kb.as_markup()}")
+    if step < len(criteria):
+        c = criteria[step]
+        text = (
+            f"<b>Вопрос {step + 1} из {total}</b>\n\n"
+            f"<b>Блок:</b> {c['block']}\n"
+            f"<b>Критерий:</b> {c['criterion']}\n"
+            f"<b>Требование:</b> {c['requirement']}\n"
+            f"<b>Макс. балл:</b> {c['max']}"
+        )
+        kb = InlineKeyboardBuilder()
+        start = 0 if c["max"] == 1 else 1
+        for i in range(start, c["max"] + 1):
+            kb.button(text=str(i), callback_data=f"score_{i}")
+        if step > 0:
+            kb.button(text="◀️ Назад", callback_data="prev")
+        kb.adjust(5)
+
+        try:
+            await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
+            logging.debug(f"Question sent to chat {chat_id} with keyboard: {kb.as_markup()}")
+        except Exception as e:
+            logging.error(f"Error sending message in send_question: {e}", exc_info=True)
+    else:
+        logging.warning(f"Attempted to access criterion with index {step}, but total criteria is {total}.")
 
 # === Обработка текстового комментария ===
 async def proc_comment(msg: types.Message, state: FSMContext):
@@ -295,7 +314,7 @@ async def make_report(user_id: int, data):
         try:
             logging.info(f"Attempting to save report to: {report_filename}")
             wb.save(report_filename)
-            logging.info(f"Report saved successfully.")
+            logging.info(f"Report savedsuccessfully.")
         except Exception as e:
             logging.error(f"Error saving report: {e}", exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при сохранении отчёта.")
@@ -304,25 +323,18 @@ async def make_report(user_id: int, data):
         try:
             logging.info(f"Attempting to send report to user {user_id}.")
             with open(report_filename, "rb") as f:
-                await bot.send_document(user_id, FSInputFile(f, report_filename))
+                await bot.send_document(user_id, FSInputFile(f, filename=report_filename))
             logging.info(f"Report sent to user {user_id}.")
         except Exception as e:
-            logging.error(f"Error sending report to user: {e}", exc_info=True)
+            logging.error(f"Error sending report: {e}", exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
-            return
-
-        try:
-            if CHAT_ID:
-                logging.info(f"Attempting to send report to chat {CHAT_ID}.")
-                with open(report_filename, "rb") as f:
-                    await bot.send_document(CHAT_ID, FSInputFile(f, report_filename))
-                logging.info(f"Report sent to chat {CHAT_ID}.")
-            else:
-                logging.warning("CHAT_ID is not set, skipping sending report to chat.")
-        except Exception as e:
-            logging.error(f"Error sending report to chat {CHAT_ID}: {e}", exc_info=True)
-
-        log_csv(pharmacy,name, ts, total_score, total_max)
+        finally:
+            try:
+                logging.info(f"Attempting to remove temporary file: {report_filename}")
+                os.remove(report_filename)
+                logging.info(f"Temporary report file '{report_filename}' deleted.")
+            except Exception as e:
+                logging.warning(f"Failed to delete temporary file {report_filename}: {e}")
 
         await bot.send_message(user_id,
                                     "✅ Отчёт сформирован и отправлен.\n"
@@ -346,8 +358,9 @@ async def make_report(user_id: int, data):
 async def handle_webhook(request: web.Request):
     logging.info(f"Received webhook request: {request.method} {request.url}")
     try:
-        update = Update(**await request.json())
-        logging.debug(f"Parsed update:\n{update}")
+        update = await request.json()
+        logging.info(f"Webhook data: {update}")  # Log the received data
+        update = Update(**update)
         await dp.feed_update(bot, update)
         return web.Response(text="OK")
     except Exception as e:
@@ -357,8 +370,15 @@ async def handle_webhook(request: web.Request):
 async def on_startup(bot: Bot):
     if WEBHOOK_URL:
         webhook_url = f"{WEBHOOK_URL}/webhook"
-        await bot.set_webhook(webhook_url)
-        logging.info(f"Webhook set to: {webhook_url}")
+        try:
+            await bot.set_webhook(webhook_url)
+            webhook_info = await bot.get_webhook_info()
+            logging.info(f"Webhook set to: {webhook_url}")
+            logging.info(f"Current webhook status: {webhook_info}")
+            if webhook_info.last_error_date:
+                logging.error(f"Last webhook error: {webhook_info.last_error_date} - {webhook_info.last_error_message}")
+        except Exception as e:
+            logging.error(f"Error setting webhook: {e}", exc_info=True)
     else:
         logging.warning("WEBHOOK_URL is not defined. Bot will run in Long Polling mode.")
 
