@@ -20,14 +20,14 @@ from aiohttp import web
 from aiogram.client.default import DefaultBotProperties
 
 # === Настройка логирования ===
-logging.basicConfig(level=logging.DEBUG)  # Уровень DEBUG для более подробных логов
+logging.basicConfig(level=logging.DEBUG)
 
 # === Загрузка конфигов ===
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 CHAT_ID = int(os.getenv("CHAT_ID", "0"))
 TEMPLATE_PATH = os.getenv("TEMPLATE_PATH", "template.xlsx")
-CHECKLIST_PATH = os.getenv("CHECKLIST_DATA", "checklist.xlsx")  # Используем CHECKLIST_DATA из Railway
+CHECKLIST_PATH = os.getenv("CHECKLIST_DATA", "checklist.xlsx")
 LOG_PATH = os.getenv("LOG_PATH", "checklist_log.csv")
 PORT = int(os.getenv("PORT", 8080))
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
@@ -109,7 +109,6 @@ bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTM
 dp = Dispatcher(storage=MemoryStorage())
 
 # === Команда /start ===
-@dp.message(F.text=="/start")
 async def cmd_start(msg: types.Message, state: FSMContext):
     logging.info(f"User {msg.from_user.id} started the bot.")
     await state.clear()
@@ -126,13 +125,11 @@ async def cmd_start(msg: types.Message, state: FSMContext):
     logging.debug(f"User {msg.from_user.id} entered state: Form.name")
 
 # === /id для отладки ===
-@dp.message(F.text=="/id")
 async def cmd_id(msg: types.Message):
     logging.info(f"User {msg.from_user.id} requested their chat ID.")
     await msg.answer(f"<code>{msg.chat.id}</code>")
 
 # === Сброс FSM ===
-@dp.message(F.text=="/сброс")
 async def cmd_reset(msg: types.Message, state: FSMContext):
     logging.info(f"User {msg.from_user.id} requested state reset.")
     await state.clear()
@@ -140,7 +137,6 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
     logging.debug(f"User {msg.from_user.id} state cleared.")
 
 # === Обработка ФИО ===
-@dp.message(Form.name)
 async def proc_name(msg: types.Message, state: FSMContext):
     name = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered name: {name}")
@@ -150,7 +146,6 @@ async def proc_name(msg: types.Message, state: FSMContext):
     logging.debug(f"User {msg.from_user.id} entered state: Form.pharmacy, data: {await state.get_data()}")
 
 # === Обработка названия аптеки ===
-@dp.message(Form.pharmacy)
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
     pharmacy = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
@@ -178,7 +173,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["data"].append(record)
         data["step"] += 1
         await state.update_data(**data)
-        logging.debug(f"User {cb.from_user.id} rated criterion {step + 1} with score: {score}")
         await bot.edit_message_text(
             f"✅ Оценка: {score} {'⭐' * score}",
             chat_id=cb.message.chat.id,
@@ -196,8 +190,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     else:
         logging.warning(f"Unhandled callback data: {cb.data}")
         await cb.answer("Неизвестная команда")
-
-dp.callback_query.register(cb_all) # Явная регистрация обработчика
 
 # === Функция отправки следующего вопроса или финального промпта ===
 async def send_question(chat_id: int, state: FSMContext):
@@ -239,7 +231,6 @@ async def send_question(chat_id: int, state: FSMContext):
     logging.debug(f"Question sent to chat {chat_id} with keyboard: {kb.as_markup()}")
 
 # === Обработка текстового комментария ===
-@dp.message(Form.comment)
 async def proc_comment(msg: types.Message, state: FSMContext):
     comment = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered comment: {comment}")
@@ -279,7 +270,7 @@ async def make_report(user_id: int, data):
         row = 6
         total_score = 0
         total_max = 0
-        for rec in data.get("data", []):  # Added .get("data", []) for safety
+        for rec in data.get("data", []):
             c = rec["crit"]
             sc = rec["score"]
             ws.cell(row, 1, c["block"])
@@ -306,7 +297,7 @@ async def make_report(user_id: int, data):
             wb.save(report_filename)
             logging.info(f"Report saved successfully.")
         except Exception as e:
-            logging.error(f"Error saving report: {e}", exc_info, exc_info=True)
+            logging.error(f"Error saving report: {e}", exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при сохранении отчёта.")
             return
 
@@ -331,7 +322,7 @@ async def make_report(user_id: int, data):
         except Exception as e:
             logging.error(f"Error sending report to chat {CHAT_ID}: {e}", exc_info=True)
 
-        log_csv(pharmacy, name, ts, total_score, total_max)
+        log_csv(pharmacy,name, ts, total_score, total_max)
 
         await bot.send_message(user_id,
                                     "✅ Отчёт сформирован и отправлен.\n"
@@ -381,6 +372,15 @@ async def main():
     dp.startup.register(on_startup)
     dp.shutdown.register(on_shutdown)
 
+    # Регистрация обработчиков
+    dp.message.register(cmd_start, F.text=="/start")
+    dp.message.register(cmd_id, F.text=="/id")
+    dp.message.register(cmd_reset, F.text=="/сброс")
+    dp.message.register(proc_name, Form.name)
+    dp.message.register(proc_pharmacy, Form.pharmacy)
+    dp.message.register(proc_comment, Form.comment)
+    dp.callback_query.register(cb_all)
+
     if WEBHOOK_URL:
         app = web.Application()
         app.add_routes([web.post("/webhook", handle_webhook)])
@@ -389,7 +389,7 @@ async def main():
         site = web.TCPSite(runner, "0.0.0.0", PORT)
         await site.start()
         logging.info(f"Web application started on port {PORT}")
-        # Keep the server running
+        # Бесконечный цикл для работы веб-сервера
         while True:
             await asyncio.sleep(3600)
     else:
