@@ -283,7 +283,7 @@ async def proc_comment(msg: types.Message, state: FSMContext):
 # === Генерация отчёта ===
 async def make_report(user_id: int, data):
     logger.info(f"Generating report for user {user_id}")
-    logger.debug(f"Report data: {data}")  # Добавляем отладочный лог
+    logger.debug(f"Report data: {data}")
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
@@ -307,6 +307,7 @@ async def make_report(user_id: int, data):
         total_score = 0
         total_max = 0
         if "data" in data and data["data"]:
+            processed_count = 0
             for rec in data["data"]:
                 crit = rec["crit"]
                 score = rec["score"]
@@ -320,6 +321,8 @@ async def make_report(user_id: int, data):
                 total_score += score
                 total_max += crit["max"]
                 row += 1
+                processed_count += 1
+            logger.info(f"Processed {processed_count} records in report")
         else:
             logger.warning("No data available for report, table will be empty")
             await bot.send_message(user_id, "⚠️ Внимание: Отчёт пуст, так как оценки не были сохранены.")
