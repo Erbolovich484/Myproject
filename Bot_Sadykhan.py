@@ -213,6 +213,15 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     await cb.answer()
 
     data = await state.get_data()
+    logger.debug(f"FSM state data: {data}")  # Добавляем отладочный лог
+
+    # Проверяем наличие необходимых ключей
+    if not data or "step" not in data:
+        logger.error("FSM state is empty or missing 'step' key")
+        await bot.send_message(cb.message.chat.id, "❌ Ошибка: Состояние сброшено. Пожалуйста, начните заново с /start.")
+        await state.clear()
+        return
+
     step = data.get("step", 0)
     total = len(criteria)
     logger.debug(f"Step: {step}, Total: {total}, Data: {cb.data}")
@@ -226,6 +235,10 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
             score = int(cb.data.split("_")[1])
             criterion = criteria[step]
             if score <= criterion["max"]:
+                # Инициализируем 'data' как список, если он отсутствует
+                if "data" not in data:
+                    logger.warning(f"'data' key missing in FSM state, initializing as empty list")
+                    data["data"] = []
                 data["data"].append({"crit": criterion, "score": score})
                 data["step"] = step + 1
                 await state.update_data(**data)
@@ -246,6 +259,9 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
             logger.error(f"Invalid callback data: {cb.data}, error: {e}")
             await bot.send_message(cb.message.chat.id, "❌ Ошибка обработки оценки.")
     elif cb.data == "prev" and step > 0:
+        if "data" not in data:
+            logger.warning(f"'data' key missing in FSM state, initializing as empty list")
+            data["data"] = []
         data["step"] = step - 1
         data["data"].pop()
         await state.update_data(**data)
@@ -359,15 +375,10 @@ async def on_startup(bot: Bot):
         webhook_url = f"{WEBHOOK_URL}{webhook_path}"
         logger.info(f"Attempting to set webhook to: {webhook_url}")
         try:
-            # Проверяем текущий вебхук
             current_webhook = await bot.get_webhook_info()
             logger.debug(f"Current webhook info: {current_webhook}")
-
-            # Устанавливаем новый вебхук
             await bot.set_webhook(webhook_url)
             logger.info(f"Webhook successfully set to: {webhook_url}")
-
-            # Проверяем, что вебхук установлен
             updated_webhook = await bot.get_webhook_info()
             logger.debug(f"Updated webhook info: {updated_webhook}")
         except Exception as e:
@@ -396,7 +407,6 @@ async def main():
     dp.message.register(proc_comment, Form.comment)
     dp.callback_query.register(cb_all)
 
-    # Проверяем, удалось ли установить вебхук
     use_webhook = await on_startup(bot)
 
     if use_webhook:
