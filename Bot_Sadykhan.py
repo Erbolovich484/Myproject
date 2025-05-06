@@ -135,7 +135,15 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
 async def proc_name(msg: types.Message, state: FSMContext):
     name = msg.text.strip()
     logger.info(f"User {msg.from_user.id} entered name: {name}")
+    # Инициализируем состояние с обязательным ключом 'data'
     await state.update_data(name=name, step=0, data=[], start=now_ts())
+    data = await state.get_data()
+    logger.debug(f"State after proc_name: {data}")
+    if "data" not in data:
+        logger.error("Failed to initialize 'data' key in state")
+        await msg.answer("❌ Ошибка: Не удалось инициализировать состояние. Начните заново с /start.")
+        await state.clear()
+        return
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
 
@@ -144,6 +152,13 @@ async def proc_pharmacy(msg: types.Message, state: FSMContext):
     pharmacy = msg.text.strip()
     logger.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
     await state.update_data(pharmacy=pharmacy)
+    data = await state.get_data()
+    logger.debug(f"State after proc_pharmacy: {data}")
+    if "data" not in data:
+        logger.error("Lost 'data' key after proc_pharmacy")
+        await msg.answer("❌ Ошибка: Данные состояния потеряны. Начните заново с /start.")
+        await state.clear()
+        return
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
     logger.debug(f"Calling send_question for chat {msg.chat.id}")
@@ -237,13 +252,17 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
                 # Проверяем наличие ключа 'data'
                 if "data" not in data or not isinstance(data["data"], list):
                     logger.warning(f"'data' key missing or invalid in FSM state, initializing as empty list")
-                    data["data"] = []
-                    await bot.send_message(
-                        cb.message.chat.id,
-                        "⚠️ Ошибка: Данные были потеряны. Пожалуйста, начните проверку заново с /start."
-                    )
-                    await state.clear()
-                    return
+                    # На шаге 0 это допустимо, так как список всё равно пустой
+                    if step == 0:
+                        data["data"] = []
+                    else:
+                        # На остальных шагах это критично
+                        await bot.send_message(
+                            cb.message.chat.id,
+                            "⚠️ Ошибка: Данные были потеряны. Пожалуйста, начните проверку заново с /start."
+                        )
+                        await state.clear()
+                        return
                 data["data"].append({"crit": criterion, "score": score})
                 data["step"] = step + 1
                 await state.update_data(**data)
@@ -277,7 +296,6 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
     elif cb.data == "prev" and step > 0:
         if "data" not in data or not isinstance(data["data"], list):
             logger.warning(f"'data' key missing or invalid in FSM state, initializing as empty list")
-            data["data"] = []
             await bot.send_message(
                 cb.message.chat.id,
                 "⚠️ Ошибка: Данные были потеряны. Пожалуйста, начните проверку заново с /start."
