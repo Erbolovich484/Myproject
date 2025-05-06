@@ -2,6 +2,7 @@ import logging
 import os
 import csv
 import pytz
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 import pandas as pd
@@ -10,6 +11,7 @@ from openpyxl.styles import Font
 import asyncio
 import json
 from logging.handlers import RotatingFileHandler
+import aiofiles
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
@@ -94,14 +96,13 @@ except Exception as e:
 def now_ts():
     return datetime.now(pytz.timezone("Asia/Almaty")).strftime("%Y-%m-%d %H:%M:%S")
 
-def log_csv(pharm, name, ts, score, total):
+async def log_csv(pharm, name, ts, score, total):
     first = not os.path.exists(LOG_PATH)
     try:
-        with open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
-            writer = csv.writer(f)
+        async with aiofiles.open(LOG_PATH, "a", newline="", encoding="utf-8") as f:
             if first:
-                writer.writerow(["Дата", "Аптека", "Проверяющий", "Баллы", "Макс"])
-            writer.writerow([ts, pharm, name, score, total])
+                await f.write(",".join(["Дата", "Аптека", "Проверяющий", "Баллы", "Макс"]) + "\n")
+            await f.write(",".join([ts, pharm, name, str(score), str(total)]) + "\n")
     except Exception as e:
         logger.error(f"Error writing to log: {e}", exc_info=True)
 
@@ -366,12 +367,13 @@ async def proc_comment(msg: types.Message, state: FSMContext):
 
 # === Генерация отчёта ===
 async def make_report(user_id: int, data):
+    start_time = time.time()
     logger.info(f"Generating report for user {user_id}")
     logger.debug(f"Report data: {data}")
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
-    report_filename = f"{pharmacy}_{name}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y_%H%M')}.xlsx".replace(" ", "_")
+    report_filename = f"{pharmacy}_{name}_{user_id}_{datetime.strptime(ts, '%Y-%m-%d %H:%M:%S').strftime('%d.%m.%Y_%H%M')}.xlsx".replace(" ", "_")
 
     try:
         wb = load_workbook(TEMPLATE_PATH)
@@ -423,20 +425,31 @@ async def make_report(user_id: int, data):
 
         try:
             file = FSInputFile(report_filename, filename=report_filename)
+            # Отправка отчёта пользователю
             await bot.send_document(user_id, file)
             logger.info(f"Report sent to user {user_id}")
+            # Отправка отчёта в дополнительный чат, если CHAT_ID задан
+            if CHAT_ID != 0:
+                try:
+                    await bot.send_document(CHAT_ID, file, caption=f"Отчёт от {name} для аптеки {pharmacy}")
+                    logger.info(f"Report sent to additional chat {CHAT_ID}")
+                except Exception as e:
+                    logger.error(f"Error sending report to additional chat {CHAT_ID}: {e}", exc_info=True)
+                    await bot.send_message(user_id, f"⚠️ Не удалось отправить отчёт в дополнительный чат {CHAT_ID}.")
         except Exception as e:
-            logger.error(f"Error sending report: {e}", exc_info=True)
+            logger.error(f"Error sending report to user {user_id}: {e}", exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при отправке отчёта.")
             return
 
-        log_csv(pharmacy, name, ts, total_score, total_max)
+        await log_csv(pharmacy, name, ts, total_score, total_max)
         await bot.send_message(user_id, "✅ Отчёт сформирован и отправлен.\n/start — новая проверка")
 
     except Exception as e:
         logger.error(f"Error generating report: {e}", exc_info=True)
         await bot.send_message(user_id, "❌ Ошибка при формировании отчёта.")
     finally:
+        elapsed_time = time.time() - start_time
+        logger.info(f"Report generation took {elapsed_time:.2f} seconds")
         try:
             if os.path.exists(report_filename):
                 os.remove(report_filename)
