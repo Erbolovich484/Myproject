@@ -8,6 +8,7 @@ import pandas as pd
 from openpyxl import load_workbook
 from openpyxl.styles import Font
 import asyncio
+import json  # Импортируем json для логирования объектов
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.enums import ParseMode
@@ -110,7 +111,7 @@ dp = Dispatcher(storage=MemoryStorage())
 
 # === Команда /start ===
 async def cmd_start(msg: types.Message, state: FSMContext):
-    logging.info(f"User {msg.from_user.id} started the bot.")
+    logging.info(f"cmd_start called by user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}'")
     await state.clear()
     await msg.answer(
         "<b>📋 Чек‑лист посещения аптек</b>\n\n"
@@ -126,12 +127,12 @@ async def cmd_start(msg: types.Message, state: FSMContext):
 
 # === /id для отладки ===
 async def cmd_id(msg: types.Message):
-    logging.info(f"User {msg.from_user.id} requested their chat ID.")
+    logging.info(f"cmd_id called by user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}'")
     await msg.answer(f"<code>{msg.chat.id}</code>")
 
 # === Сброс FSM ===
 async def cmd_reset(msg: types.Message, state: FSMContext):
-    logging.info(f"User {msg.from_user.id} requested state reset.")
+    logging.info(f"cmd_reset called by user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}'")
     await state.clear()
     await msg.answer("Состояние сброшено. /start — начать заново")
     logging.debug(f"User {msg.from_user.id} state cleared.")
@@ -139,32 +140,34 @@ async def cmd_reset(msg: types.Message, state: FSMContext):
 # === Обработка ФИО ===
 async def proc_name(msg: types.Message, state: FSMContext):
     name = msg.text.strip()
-    logging.info(f"User {msg.from_user.id} entered name: {name}")
+    logging.info(f"proc_name called by user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}', name: '{name}'")
     await state.update_data(name=name, step=0, data=[], start=now_ts())
+    logging.debug(f"State after proc_name: {await state.get_data()}")
     await msg.answer("Введите название аптеки:")
     await state.set_state(Form.pharmacy)
-    logging.debug(f"User {msg.from_user.id} entered state: Form.pharmacy, data: {await state.get_data()}")
+    logging.debug(f"User {msg.from_user.id} entered state: Form.pharmacy")
 
 # === Обработка названия аптеки ===
 async def proc_pharmacy(msg: types.Message, state: FSMContext):
-    logging.info(f"proc_pharmacy started for user {msg.from_user.id}")
+    logging.info(f"proc_pharmacy started for user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}'")
     pharmacy = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered pharmacy: {pharmacy}")
     await state.update_data(pharmacy=pharmacy)
+    logging.debug(f"State after proc_pharmacy (before send_question): {await state.get_data()}")
     await msg.answer("Начинаем проверку…")
     await state.set_state(Form.rating)
-    logging.debug(f"User {msg.from_user.id} entered state: Form.rating, data: {await state.get_data()}")
-    logging.info(f"Calling send_question from proc_pharmacy for user {msg.from_user.id}")
+    logging.debug(f"User {msg.from_user.id} entered state: Form.rating")
+    logging.info(f"Calling send_question from proc_pharmacy for user {msg.from_user.id}, chat {msg.chat.id}")
     await send_question(msg.chat.id, state)
-    logging.info(f"proc_pharmacy finished for user {msg.from_user.id}")
+    logging.info(f"proc_pharmacy finished for user {msg.from_user.id}, chat {msg.chat.id}")
 
 # === Общий хэндлер callback_query ===
 async def cb_all(cb: types.CallbackQuery, state: FSMContext):
-    logging.info(f"Callback query received from user {cb.from_user.id}, data: {cb.data}")
+    logging.info(f"cb_all called by user {cb.from_user.id}, chat {cb.message.chat.id}, data: '{cb.data}'")
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
-    logging.debug(f"Current step: {step}, Total criteria: {total}, Callback data: {cb.data}")
+    logging.debug(f"Current step: {step}, Total criteria: {total}, Callback data: {cb.data}, State data: {data}")
 
     if step >= total:
         logging.debug("All criteria have been rated.")
@@ -176,6 +179,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["data"].append(record)
         data["step"] += 1
         await state.update_data(**data)
+        logging.debug(f"State after score update: {await state.get_data()}")
         try:
             await bot.edit_message_text(
                 f"✅ Оценка: {score} {'⭐' * score}",
@@ -190,7 +194,7 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
         data["step"] -= 1
         data["data"].pop()
         await state.update_data(**data)
-        logging.debug(f"User {cb.from_user.id} navigated back to criterion {data['step'] + 1}")
+        logging.debug(f"User navigated back, state: {await state.get_data()}")
         await send_question(cb.from_user.id, state)
         return
     else:
@@ -203,7 +207,7 @@ async def send_question(chat_id: int, state: FSMContext):
     data = await state.get_data()
     step = data.get("step", 0)
     total = len(criteria)
-    logging.info(f"Sending question {step + 1} of {total} to chat {chat_id}.")
+    logging.info(f"Sending question {step + 1} of {total} to chat {chat_id}. Current step: {step}")
     logging.debug(f"Current state data in send_question: {data}")
 
     if step >= total:
@@ -242,8 +246,8 @@ async def send_question(chat_id: int, state: FSMContext):
         kb.adjust(5)
 
         try:
-            await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
-            logging.debug(f"Question sent to chat {chat_id} with keyboard: {kb.as_markup()}")
+            sent_message = await bot.send_message(chat_id, text, reply_markup=kb.as_markup())
+            logging.debug(f"Question sent to chat {chat_id}, message ID: {sent_message.message_id}, keyboard: {kb.as_markup().to_python()}")
         except Exception as e:
             logging.error(f"Error sending message in send_question: {e}", exc_info=True)
     else:
@@ -251,11 +255,13 @@ async def send_question(chat_id: int, state: FSMContext):
 
 # === Обработка текстового комментария ===
 async def proc_comment(msg: types.Message, state: FSMContext):
+    logging.info(f"proc_comment called by user {msg.from_user.id}, chat {msg.chat.id}, text: '{msg.text}'")
     comment = msg.text.strip()
     logging.info(f"User {msg.from_user.id} entered comment: {comment}")
     data = await state.get_data()
     data["comment"] = comment
     await state.update_data(**data)
+    logging.debug(f"State after comment: {await state.get_data()}")
     await msg.answer("⌛ Формирую отчёт…")
     await make_report(msg.chat.id, data)
     await state.clear()
@@ -263,7 +269,7 @@ async def proc_comment(msg: types.Message, state: FSMContext):
 
 # === Генерация и отправка отчёта ===
 async def make_report(user_id: int, data):
-    logging.info(f"Generating report for user {user_id} with data:\n{data}")
+    logging.info(f"make_report started for user {user_id} with data:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
     name = data["name"]
     ts = data["start"]
     pharmacy = data["pharmacy"]
@@ -314,7 +320,7 @@ async def make_report(user_id: int, data):
         try:
             logging.info(f"Attempting to save report to: {report_filename}")
             wb.save(report_filename)
-            logging.info(f"Report savedsuccessfully.")
+            logging.info(f"Report saved successfully.")
         except Exception as e:
             logging.error(f"Error saving report: {e}", exc_info=True)
             await bot.send_message(user_id, "❌ Ошибка при сохранении отчёта.")
@@ -359,7 +365,7 @@ async def handle_webhook(request: web.Request):
     logging.info(f"Received webhook request: {request.method} {request.url}")
     try:
         update = await request.json()
-        logging.info(f"Webhook data: {update}")  # Log the received data
+        logging.debug(f"Webhook data received:\n{json.dumps(update, indent=2, ensure_ascii=False)}")
         update = Update(**update)
         await dp.feed_update(bot, update)
         return web.Response(text="OK")
