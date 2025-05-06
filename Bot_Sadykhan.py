@@ -70,9 +70,8 @@ try:
     df = df.iloc[start_i:, :8].reset_index(drop=True)
     df.columns = ["Блок", "Критерий", "Требование", "Оценка", "Макс", "Примечание", "Дата проверки", "Дата исправления"]
 
-    last_block = "Неизвестный блок"  # Значение по умолчанию
+    last_block = "Неизвестный блок"
     for _, row in df.iterrows():
-        # Пропускаем строки, где "Критерий" или "Требование" пусты
         if pd.isna(row["Критерий"]) or pd.isna(row["Требование"]):
             continue
 
@@ -178,7 +177,6 @@ async def send_question(chat_id: int, state: FSMContext):
     try:
         criterion = criteria[step]
         logger.debug(f"Criterion at step {step}: {criterion}")
-        # Проверяем, что все ключи присутствуют и не пусты
         required_keys = ["block", "criterion", "requirement", "max"]
         missing_keys = [key for key in required_keys if key not in criterion or criterion[key] is None or str(criterion[key]).strip() == ""]
         if missing_keys:
@@ -343,11 +341,13 @@ async def make_report(user_id: int, data):
 # === Webhook ===
 async def handle_webhook(request: web.Request):
     logger.info(f"Webhook received: {request.method} {request.url}")
+    logger.debug(f"Request headers: {request.headers}")
     try:
         update = await request.json()
         logger.debug(f"Webhook data: {json.dumps(update, indent=2, ensure_ascii=False)}")
-        update = Update(**update)
-        await dp.feed_update(bot, update)
+        update_obj = Update(**update)
+        await dp.feed_update(bot, update_obj)
+        logger.info("Webhook update processed successfully")
         return web.Response(text="OK")
     except Exception as e:
         logger.error(f"Webhook error: {e}", exc_info=True)
@@ -357,13 +357,27 @@ async def on_startup(bot: Bot):
     if WEBHOOK_URL:
         webhook_path = "/webhook"
         webhook_url = f"{WEBHOOK_URL}{webhook_path}"
+        logger.info(f"Attempting to set webhook to: {webhook_url}")
         try:
+            # Проверяем текущий вебхук
+            current_webhook = await bot.get_webhook_info()
+            logger.debug(f"Current webhook info: {current_webhook}")
+
+            # Устанавливаем новый вебхук
             await bot.set_webhook(webhook_url)
-            logger.info(f"Webhook set to: {webhook_url}")
+            logger.info(f"Webhook successfully set to: {webhook_url}")
+
+            # Проверяем, что вебхук установлен
+            updated_webhook = await bot.get_webhook_info()
+            logger.debug(f"Updated webhook info: {updated_webhook}")
         except Exception as e:
             logger.error(f"Error setting webhook: {e}", exc_info=True)
+            logger.warning("Falling back to long polling due to webhook failure")
+            return False
     else:
         logger.warning("WEBHOOK_URL not set, using long polling")
+        return False
+    return True
 
 async def on_shutdown(bot: Bot):
     logger.info("Shutting down bot")
@@ -382,7 +396,10 @@ async def main():
     dp.message.register(proc_comment, Form.comment)
     dp.callback_query.register(cb_all)
 
-    if WEBHOOK_URL:
+    # Проверяем, удалось ли установить вебхук
+    use_webhook = await on_startup(bot)
+
+    if use_webhook:
         app = web.Application()
         app.add_routes([web.post("/webhook", handle_webhook)])
         runner = web.AppRunner(app)
@@ -393,6 +410,7 @@ async def main():
         while True:
             await asyncio.sleep(3600)
     else:
+        logger.info("Starting bot in long polling mode")
         await dp.start_polling(bot)
 
 if __name__ == "__main__":
