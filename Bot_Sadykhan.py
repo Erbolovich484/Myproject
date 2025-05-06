@@ -234,13 +234,31 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
             score = int(cb.data.split("_")[1])
             criterion = criteria[step]
             if score <= criterion["max"]:
-                if "data" not in data:
-                    logger.warning(f"'data' key missing in FSM state, initializing as empty list")
+                # Проверяем наличие ключа 'data'
+                if "data" not in data or not isinstance(data["data"], list):
+                    logger.warning(f"'data' key missing or invalid in FSM state, initializing as empty list")
                     data["data"] = []
+                    await bot.send_message(
+                        cb.message.chat.id,
+                        "⚠️ Ошибка: Данные были потеряны. Пожалуйста, начните проверку заново с /start."
+                    )
+                    await state.clear()
+                    return
                 data["data"].append({"crit": criterion, "score": score})
                 data["step"] = step + 1
                 await state.update_data(**data)
                 logger.debug(f"Score {score} saved for step {step}")
+                logger.debug(f"Total scores saved: {len(data['data'])}")
+                # Проверяем, что количество сохранённых оценок соответствует текущему шагу
+                expected_scores = step + 1
+                if len(data["data"]) != expected_scores:
+                    logger.error(f"Data inconsistency: expected {expected_scores} scores, but found {len(data['data'])}")
+                    await bot.send_message(
+                        cb.message.chat.id,
+                        f"❌ Ошибка: Данные повреждены (ожидается {expected_scores} оценок, найдено {len(data['data'])}). Начните заново с /start."
+                    )
+                    await state.clear()
+                    return
                 try:
                     await bot.edit_message_text(
                         f"✅ Оценка: {score} {'⭐' * score}",
@@ -257,13 +275,30 @@ async def cb_all(cb: types.CallbackQuery, state: FSMContext):
             logger.error(f"Invalid callback data: {cb.data}, error: {e}")
             await bot.send_message(cb.message.chat.id, "❌ Ошибка обработки оценки.")
     elif cb.data == "prev" and step > 0:
-        if "data" not in data:
-            logger.warning(f"'data' key missing in FSM state, initializing as empty list")
+        if "data" not in data or not isinstance(data["data"], list):
+            logger.warning(f"'data' key missing or invalid in FSM state, initializing as empty list")
             data["data"] = []
+            await bot.send_message(
+                cb.message.chat.id,
+                "⚠️ Ошибка: Данные были потеряны. Пожалуйста, начните проверку заново с /start."
+            )
+            await state.clear()
+            return
         data["step"] = step - 1
         data["data"].pop()
         await state.update_data(**data)
         logger.debug(f"Navigated back to step {step - 1}")
+        logger.debug(f"Total scores saved: {len(data['data'])}")
+        # Проверяем количество сохранённых оценок после возврата назад
+        expected_scores = step
+        if len(data["data"]) != expected_scores:
+            logger.error(f"Data inconsistency after prev: expected {expected_scores} scores, but found {len(data['data'])}")
+            await bot.send_message(
+                cb.message.chat.id,
+                f"❌ Ошибка: Данные повреждены (ожидается {expected_scores} оценок, найдено {len(data['data'])}). Начните заново с /start."
+            )
+            await state.clear()
+            return
         await send_question(cb.message.chat.id, state)
     else:
         logger.warning(f"Unhandled callback: {cb.data}")
@@ -276,6 +311,23 @@ async def proc_comment(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     data["comment"] = comment
     await state.update_data(**data)
+    logger.debug(f"Data before report generation: {data}")
+    if "data" not in data or not data["data"]:
+        logger.warning("No scores saved for the report")
+        await msg.answer("⚠️ Ошибка: Оценки не сохранены. Пожалуйста, начните проверку заново с /start.")
+        await state.clear()
+        return
+    # Проверяем, что все 32 шага завершены
+    total_steps = len(criteria)
+    saved_scores = len(data["data"])
+    logger.info(f"Total scores saved before report: {saved_scores}")
+    if saved_scores != total_steps:
+        logger.error(f"Expected {total_steps} scores, but found {saved_scores}")
+        await msg.answer(
+            f"❌ Ошибка: Завершено только {saved_scores} из {total_steps} шагов. Начните проверку заново с /start."
+        )
+        await state.clear()
+        return
     await msg.answer("⌛ Формирую отчёт…")
     await make_report(msg.chat.id, data)
     await state.clear()
